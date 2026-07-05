@@ -451,12 +451,12 @@ export const mongodbAgent = new Agent({
     storage: new MongoDBStore({
       id: 'mongodb-storage',
       uri: process.env.MONGODB_URI!,
-      dbName: process.env.MONGODB_DB_NAME!,
+      dbName: process.env.MONGODB_DATABASE!,
     }),
     vector: new MongoDBVector({
       id: 'mongodb-vector',
       uri: process.env.MONGODB_URI!,
-      dbName: process.env.MONGODB_DB_NAME!,
+      dbName: process.env.MONGODB_DATABASE!,
     }),
     embedder: fastembed,
     options: {
