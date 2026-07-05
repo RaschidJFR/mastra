@@ -224,6 +224,14 @@ Searches for similar vectors with optional metadata filtering.
     defaultValue: 'false',
     description: 'Whether to include vector data in results',
   },
+  {
+    name: 'numCandidates',
+    type: 'number',
+    isOptional: true,
+    defaultValue: '20 * topK (capped at 10000)',
+    description:
+      'Number of candidates the HNSW graph considers before selecting top-K results. Higher values improve recall at the cost of latency. See: https://www.mongodb.com/docs/atlas/atlas-vector-search/vector-search-stage/',
+  },
 ]}
 />
 

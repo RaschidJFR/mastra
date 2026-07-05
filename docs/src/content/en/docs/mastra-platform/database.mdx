@@ -24,13 +24,15 @@ Hosted databases are available through three providers. Pick one when you attach
 
 You can attach one database per provider to a project. This keeps environment variable names unambiguous — for example, a project has a single `DATABASE_URL` for Postgres and separate `TURSO_*` variables for Turso. Attach Turso and Postgres to the same project when you need separate stores for different workloads.
 
-For most agent-focused projects, **Turso** is the simplest starting point. It provides a lightweight, SQLite-compatible engine well suited to agent memory, conversation history, and per-tenant isolation. Choose **Postgres** when your workload needs full SQL, relational schemas, or structured application data beyond Mastra runtime state. **MongoDB** (_coming soon_) will add document storage and built-in vector search for workloads that don't map cleanly to SQL.
+For most agent-focused projects, **Turso** is the simplest starting point. It provides a lightweight, SQLite-compatible engine well suited to agent memory, conversation history, and per-tenant isolation. Choose **Postgres** when your workload needs full SQL, relational schemas, or structured application data beyond Mastra runtime state.
 
-| Provider | Engine | Best for |
-| - | - | - |
-| **Turso** | LibSQL, SQLite-compatible | Agent memory, per-tenant isolation |
-| **PostgreSQL** | Serverless Postgres | Relational workloads, structured data |
-| **MongoDB** | Document and vector search | Document storage, vector search (_coming soon_) |
+**MongoDB** is fully supported when you bring your own database (Atlas or self-hosted). It provides document storage and built-in vector search for workloads that don't map cleanly to SQL. Platform-managed MongoDB hosting is coming soon.
+
+| Provider | Engine | Best for | Availability |
+| - | - | - | - |
+| **Turso** | LibSQL, SQLite-compatible | Agent memory, per-tenant isolation | Platform-hosted |
+| **PostgreSQL** | Serverless Postgres | Relational workloads, structured data | Platform-hosted |
+| **MongoDB** | Document and vector search | Document storage, vector search | Self-hosted only ([guide](/reference/storage/mongodb)) |
 
 ## Attach a database
 
