@@ -86,12 +86,12 @@ Semantic recall is disabled by default. To enable it, set `semanticRecall: true`
         storage: new MongoDBStore({
           id: 'agent-storage',
           uri: process.env.MONGODB_URI,
-          dbName: process.env.MONGODB_DATABASE,
+          dbName: process.env.MONGODB_DB_NAME,
         }),
         vector: new MongoDBVector({
           id: 'agent-vector',
           uri: process.env.MONGODB_URI,
-          dbName: process.env.MONGODB_DATABASE,
+          dbName: process.env.MONGODB_DB_NAME,
         }),
         embedder: new ModelRouterEmbeddingModel('openai/text-embedding-3-small'),
         options: {

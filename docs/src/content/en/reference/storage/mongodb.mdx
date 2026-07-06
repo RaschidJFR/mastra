@@ -19,7 +19,7 @@ npm install @mastra/mongodb@latest
 
 ## Usage
 
-Ensure you have a MongoDB Atlas Local (via Docker) or MongoDB Atlas Cloud instance with Atlas Search enabled. MongoDB 7.0+ is recommended.
+Ensure you have a [MongoDB Atlas Local (via Docker)](https://www.mongodb.com/docs/atlas/cli/current/atlas-cli-deploy-docker/) or [MongoDB Atlas Cloud](https://www.mongodb.com/docs/atlas/cli/current/atlas-cli-getting-started/) instance with Atlas Search enabled. MongoDB 7.0+ is recommended.
 
 ```typescript
 import { MongoDBStore } from '@mastra/mongodb'
@@ -27,7 +27,7 @@ import { MongoDBStore } from '@mastra/mongodb'
 const storage = new MongoDBStore({
   id: 'mongodb-storage',
   uri: process.env.MONGODB_URI,
-  dbName: process.env.MONGODB_DATABASE,
+  dbName: process.env.MONGODB_DB_NAME,
 })
 ```
 
@@ -48,12 +48,6 @@ const storage = new MongoDBStore({
     isOptional: false,
   },
   {
-    name: 'url',
-    type: 'string',
-    description: 'Deprecated. Use uri instead. MongoDB connection string (supported for backward compatibility).',
-    isOptional: true,
-  },
-  {
     name: 'dbName',
     type: 'string',
     description: 'The name of the database you want the storage to use.',
@@ -62,7 +56,8 @@ const storage = new MongoDBStore({
   {
     name: 'options',
     type: 'MongoClientOptions',
-    description: 'MongoDB client options for advanced configuration (SSL, connection pooling, etc.).',
+    description:
+      'MongoDB client options for advanced configuration (SSL, connection pooling, etc.). @see https://www.mongodb.com/docs/drivers/node/current/fundamentals/connection/connection-options/',
     isOptional: true,
   },
   {
@@ -83,7 +78,7 @@ const storage = new MongoDBStore({
     name: 'indexes',
     type: 'MongoDBIndexConfig[]',
     description:
-      'Custom indexes to create during initialization. Each index must specify a collection, keys, and optional index options.',
+      'Custom indexes to create during initialization. Each index must specify a collection, keys, and optional index options. @see https://www.mongodb.com/docs/manual/indexes/',
     isOptional: true,
   },
   {
@@ -95,10 +90,6 @@ const storage = new MongoDBStore({
   },
 ]}
 />
-
-:::note[Deprecation Notice]
-The `url` parameter is deprecated but still supported for backward compatibility. Please use `uri` instead in all new code.
-:::
 
 ## Constructor examples
 
@@ -176,7 +167,7 @@ import { MongoDBStore } from '@mastra/mongodb'
 const storage = new MongoDBStore({
   id: 'mongodb-storage',
   uri: process.env.MONGODB_URI,
-  dbName: process.env.MONGODB_DATABASE,
+  dbName: process.env.MONGODB_DB_NAME,
 })
 
 const mastra = new Mastra({
@@ -192,7 +183,7 @@ import { MongoDBStore } from '@mastra/mongodb'
 const storage = new MongoDBStore({
   id: 'mongodb-storage',
   uri: process.env.MONGODB_URI,
-  dbName: process.env.MONGODB_DATABASE,
+  dbName: process.env.MONGODB_DB_NAME,
 })
 
 // Required when using storage directly
@@ -217,7 +208,7 @@ import { MongoDBStore } from '@mastra/mongodb'
 const storage = new MongoDBStore({
   id: 'mongodb-storage',
   uri: process.env.MONGODB_URI,
-  dbName: process.env.MONGODB_DATABASE,
+  dbName: process.env.MONGODB_DB_NAME,
 })
 
 // Use storage...
@@ -238,7 +229,7 @@ import { MongoDBVector } from '@mastra/mongodb'
 const vectorStore = new MongoDBVector({
   id: 'mongodb-vector',
   uri: process.env.MONGODB_URI,
-  dbName: process.env.MONGODB_DATABASE,
+  dbName: process.env.MONGODB_DB_NAME,
 })
 
 // Create a vector index for embeddings
@@ -299,7 +290,7 @@ export const mongodbAgent = new Agent({
     storage: new MongoDBStore({
       id: 'mongodb-storage',
       uri: process.env.MONGODB_URI!,
-      dbName: process.env.MONGODB_DATABASE!,
+      dbName: process.env.MONGODB_DB_NAME!,
     }),
     options: {
       generateTitle: true,

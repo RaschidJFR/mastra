@@ -27,7 +27,7 @@ import { MongoDBVector } from '@mastra/mongodb'
 const store = new MongoDBVector({
   id: 'mongodb-vector',
   uri: process.env.MONGODB_URI,
-  dbName: process.env.MONGODB_DATABASE,
+  dbName: process.env.MONGODB_DB_NAME,
 })
 ```
 
@@ -41,7 +41,7 @@ import { MongoDBVector } from '@mastra/mongodb'
 const store = new MongoDBVector({
   id: 'mongodb-vector',
   uri: process.env.MONGODB_URI,
-  dbName: process.env.MONGODB_DATABASE,
+  dbName: process.env.MONGODB_DB_NAME,
   embeddingFieldPath: 'text.contentEmbedding', // Store embeddings at text.contentEmbedding
 })
 ```
@@ -452,12 +452,12 @@ export const mongodbAgent = new Agent({
     storage: new MongoDBStore({
       id: 'mongodb-storage',
       uri: process.env.MONGODB_URI!,
-      dbName: process.env.MONGODB_DATABASE!,
+      dbName: process.env.MONGODB_DB_NAME!,
     }),
     vector: new MongoDBVector({
       id: 'mongodb-vector',
       uri: process.env.MONGODB_URI!,
-      dbName: process.env.MONGODB_DATABASE!,
+      dbName: process.env.MONGODB_DB_NAME!,
     }),
     embedder: fastembed,
     options: {
@@ -497,12 +497,12 @@ export const mongodbVoyageAgent = new Agent({
     storage: new MongoDBStore({
       id: 'mongodb-storage',
       uri: process.env.MONGODB_URI!,
-      dbName: process.env.MONGODB_DATABASE!,
+      dbName: process.env.MONGODB_DB_NAME!,
     }),
     vector: new MongoDBVector({
       id: 'mongodb-vector',
       uri: process.env.MONGODB_URI!,
-      dbName: process.env.MONGODB_DATABASE!,
+      dbName: process.env.MONGODB_DB_NAME!,
     }),
     embedder: voyage, // VoyageAI's default model (voyage-3.5, 1024 dimensions)
     options: {
@@ -527,7 +527,7 @@ import { voyage, voyageEmbedding } from '@mastra/voyageai'
 const mongoVector = new MongoDBVector({
   id: 'mongodb-vector',
   uri: process.env.MONGODB_URI!,
-  dbName: process.env.MONGODB_DATABASE!,
+  dbName: process.env.MONGODB_DB_NAME!,
 })
 
 // For code embeddings (1024 dimensions)
@@ -558,7 +558,7 @@ import { voyage } from '@mastra/voyageai'
 const mongoVector = new MongoDBVector({
   id: 'mongodb-multimodal',
   uri: process.env.MONGODB_URI!,
-  dbName: process.env.MONGODB_DATABASE!,
+  dbName: process.env.MONGODB_DB_NAME!,
 })
 
 // Create index for multimodal embeddings
@@ -619,7 +619,7 @@ import { voyageEmbedding } from '@mastra/voyageai'
 const mongoVector = new MongoDBVector({
   id: 'mongodb-vector',
   uri: process.env.MONGODB_URI!,
-  dbName: process.env.MONGODB_DATABASE!,
+  dbName: process.env.MONGODB_DB_NAME!,
 })
 
 // Use 'document' mode when indexing content

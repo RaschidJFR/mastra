@@ -100,7 +100,7 @@ Add storage to your Mastra instance so all agents, workflows, observability trac
       storage: new MongoDBStore({
         id: 'mastra-storage',
         uri: process.env.MONGODB_URI,
-        dbName: process.env.MONGODB_DATABASE,
+        dbName: process.env.MONGODB_DB_NAME,
       }),
     })
 
