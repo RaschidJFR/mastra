@@ -57,7 +57,7 @@ const storage = new MongoDBStore({
     name: 'options',
     type: 'MongoClientOptions',
     description:
-      'MongoDB client options for advanced configuration (SSL, connection pooling, etc.). @see https://www.mongodb.com/docs/drivers/node/current/fundamentals/connection/connection-options/',
+      'MongoDB client options for advanced configuration (SSL, connection pooling, etc.). See [Connection Options](https://www.mongodb.com/docs/drivers/node/current/fundamentals/connection/connection-options/)',
     isOptional: true,
   },
   {
@@ -78,7 +78,7 @@ const storage = new MongoDBStore({
     name: 'indexes',
     type: 'MongoDBIndexConfig[]',
     description:
-      'Custom indexes to create during initialization. Each index must specify a collection, keys, and optional index options. @see https://www.mongodb.com/docs/manual/indexes/',
+      'Custom indexes to create during initialization. Each index must specify a collection, keys, and optional index options. See [Indexes](https://www.mongodb.com/docs/manual/indexes/)',
     isOptional: true,
   },
   {
