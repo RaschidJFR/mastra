@@ -26,13 +26,13 @@ You can attach one database per provider to a project. This keeps environment va
 
 For most agent-focused projects, **Turso** is the simplest starting point. It provides a lightweight, SQLite-compatible engine well suited to agent memory, conversation history, and per-tenant isolation. Choose **Postgres** when your workload needs full SQL, relational schemas, or structured application data beyond Mastra runtime state.
 
-**MongoDB** is fully supported when you bring your own database (Atlas or self-hosted). It provides document storage and built-in vector search for workloads that don't map cleanly to SQL. Platform-managed MongoDB hosting is coming soon.
+**MongoDB** is fully supported when you bring your own database (Atlas or self-hosted). It provides document storage and built-in vector search for workloads that don't map cleanly to SQL.
 
 | Provider | Engine | Best for | Availability |
 | - | - | - | - |
 | **Turso** | LibSQL, SQLite-compatible | Agent memory, per-tenant isolation | Platform-hosted |
 | **PostgreSQL** | Serverless Postgres | Relational workloads, structured data | Platform-hosted |
-| **MongoDB** | Document and vector search | Document storage, vector search | Self-hosted only ([storage](/reference/storage/mongodb), [vectors](/reference/vectors/mongodb)) |
+| **MongoDB** | Document and vector search | Document storage, vector search | Bring your own (Atlas or self-hosted) - [storage](/reference/storage/mongodb), [vectors](/reference/vectors/mongodb) |
 
 ## Attach a database
 
@@ -117,14 +117,46 @@ export const mastra = new Mastra({
 })
 ```
 
+### MongoDB
+
+MongoDB requires you to bring your own database (Atlas or self-hosted). Set your connection details as environment variables: `MONGODB_URI` and `MONGODB_DB_NAME`. The following example connects a [MongoDBStore](/reference/storage/mongodb) using those variables.
+
+```ts title="src/mastra/storage.ts" caption="Connect a MongoDB database"
+import { MongoDBStore } from '@mastra/mongodb'
+
+export const storage = new MongoDBStore({
+  id: 'mongodb-storage',
+  uri: process.env.MONGODB_URI!,
+  dbName: process.env.MONGODB_DB_NAME!,
+})
+```
+
+Install the adapter:
+
+```bash npm2yarn
+npm install @mastra/mongodb@latest
+```
+
+Wire the `storage` instance into your Mastra configuration:
+
+```ts title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core'
+import { storage } from './storage'
+
+export const mastra = new Mastra({
+  storage,
+})
+```
+
 ## Environment variables
 
-Each provider injects a fixed set of managed environment variables. These are available to your project at runtime when the database is `ready`. You don't define them yourself.
+For platform-hosted databases (Turso and Postgres), the platform injects managed environment variables when the database is ready. For MongoDB, you define these variables yourself since you bring your own database.
 
-| Provider | Variables |
-| - | - |
-| Turso | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` |
-| Postgres | `DATABASE_URL` |
+| Provider | Variables | Managed by platform? |
+| - | - | - |
+| Turso | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | Yes |
+| Postgres | `DATABASE_URL` | Yes |
+| MongoDB | `MONGODB_URI`, `MONGODB_DB_NAME` | No (bring your own) |
 
 :::warning
 Treat connection credentials as secrets. The auth token (`TURSO_AUTH_TOKEN`) and the Postgres connection string (`DATABASE_URL`) grant full access to your data. The platform masks them by default and only reveals them on request.
