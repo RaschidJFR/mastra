@@ -55,48 +55,7 @@ After generating embeddings, you need to store them in a database that supports 
 
     <h3>Using VoyageAI with MongoDB</h3>
 
-    MongoDB works seamlessly with VoyageAI's embedding models, which are optimized for retrieval tasks:
-
-    ```ts title="mongodb-voyageai.ts"
-    import { MongoDBVector } from '@mastra/mongodb'
-    import { voyage } from '@mastra/voyageai'
-
-    // Initialize MongoDB
-    const store = new MongoDBVector({
-      id: 'mongodb-vector',
-      uri: process.env.MONGODB_URI,
-      dbName: process.env.MONGODB_DB_NAME,
-    })
-
-    // Create index for VoyageAI embeddings (default: 1024 dimensions)
-    await store.createIndex({
-      indexName: 'myCollection',
-      dimension: 1024,
-    })
-
-    // Generate embeddings with VoyageAI
-    const { embeddings } = await voyage.doEmbed({
-      values: chunks.map(chunk => chunk.text),
-    })
-
-    // Store in MongoDB
-    await store.upsert({
-      indexName: 'myCollection',
-      vectors: embeddings,
-      metadata: chunks.map(chunk => ({ text: chunk.text })),
-    })
-
-    // Query with VoyageAI
-    const { embedding: queryEmbedding } = await voyage.doEmbed({
-      values: ['search query'],
-    })
-
-    const results = await store.query({
-      indexName: 'myCollection',
-      queryVector: queryEmbedding[0],
-      topK: 5,
-    })
-    ```
+    MongoDB works seamlessly with VoyageAI's embedding models, which are optimized for retrieval tasks. For complete examples and specialized models, see the [VoyageAI embeddings documentation](/models/embeddings#voyageai) and [MongoDB vector reference](/reference/vectors/mongodb).
   </TabItem>
 
   <TabItem value="pg-vector" label="PgVector">
@@ -430,6 +389,7 @@ The dimension size must match the output dimension of your chosen embedding mode
 
 - `OpenAI text-embedding-3-small`: 1536 dimensions (or custom, e.g., 256)
 - `Cohere embed-multilingual-v3`: 1024 dimensions
+- `VoyageAI voyage-3.5`: 1024 dimensions (or custom: 256, 512, 1024, 2048)
 - `Google gemini-embedding-001`: 768 dimensions (or custom)
 
 :::warning
