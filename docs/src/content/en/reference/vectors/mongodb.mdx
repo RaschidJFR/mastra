@@ -6,6 +6,7 @@ packages:
   - "@mastra/fastembed"
   - "@mastra/memory"
   - "@mastra/mongodb"
+  - "@mastra/voyageai"
 ---
 
 # MongoDB vector store
@@ -471,6 +472,190 @@ export const mongodbAgent = new Agent({
 })
 ```
 
+### Vector embeddings with VoyageAI
+
+VoyageAI provides specialized embedding models optimized for retrieval tasks. Here's how to use VoyageAI with MongoDB Atlas Vector Search:
+
+```bash npm2yarn
+npm install @mastra/voyageai@latest
+```
+
+#### Basic usage with VoyageAI
+
+```typescript title="src/mastra/agents/example-mongodb-voyageai-agent.ts"
+import { Memory } from '@mastra/memory'
+import { Agent } from '@mastra/core/agent'
+import { MongoDBStore, MongoDBVector } from '@mastra/mongodb'
+import { voyage } from '@mastra/voyageai'
+
+export const mongodbVoyageAgent = new Agent({
+  id: 'mongodb-voyage-agent',
+  name: 'MongoDB VoyageAI Agent',
+  instructions: 'You are an AI agent with semantic recall powered by VoyageAI and MongoDB.',
+  model: '__GATEWAY_OPENAI_MODEL__',
+  memory: new Memory({
+    storage: new MongoDBStore({
+      id: 'mongodb-storage',
+      uri: process.env.MONGODB_URI!,
+      dbName: process.env.MONGODB_DATABASE!,
+    }),
+    vector: new MongoDBVector({
+      id: 'mongodb-vector',
+      uri: process.env.MONGODB_URI!,
+      dbName: process.env.MONGODB_DATABASE!,
+    }),
+    embedder: voyage, // VoyageAI's default model (voyage-3.5, 1024 dimensions)
+    options: {
+      lastMessages: 10,
+      semanticRecall: {
+        topK: 5,
+        messageRange: 2,
+      },
+    },
+  }),
+})
+```
+
+#### Using specialized VoyageAI models
+
+VoyageAI offers different models optimized for specific use cases:
+
+```typescript title="src/mastra/vectors/mongodb-voyage-specialized.ts"
+import { MongoDBVector } from '@mastra/mongodb'
+import { voyage, voyageEmbedding } from '@mastra/voyageai'
+
+const mongoVector = new MongoDBVector({
+  id: 'mongodb-vector',
+  uri: process.env.MONGODB_URI!,
+  dbName: process.env.MONGODB_DATABASE!,
+})
+
+// For code embeddings (1024 dimensions)
+const codeEmbedder = voyage.code
+
+// For large-scale applications (1536 dimensions)
+const largeEmbedder = voyage.large
+
+// For high-throughput applications (voyage-4, 320k batch tokens)
+const v4Embedder = voyage.v4
+
+// Custom configuration with output dimension control
+const customEmbedder = voyageEmbedding({
+  model: 'voyage-3.5',
+  inputType: 'document', // or 'query' for search queries
+  outputDimension: 512, // 256, 512, 1024, or 2048
+})
+```
+
+#### Multimodal embeddings with MongoDB
+
+VoyageAI supports multimodal embeddings (text + images), which can be stored in MongoDB:
+
+```typescript title="src/mastra/vectors/mongodb-multimodal.ts"
+import { MongoDBVector } from '@mastra/mongodb'
+import { voyage } from '@mastra/voyageai'
+
+const mongoVector = new MongoDBVector({
+  id: 'mongodb-multimodal',
+  uri: process.env.MONGODB_URI!,
+  dbName: process.env.MONGODB_DATABASE!,
+})
+
+// Create index for multimodal embeddings
+await mongoVector.createIndex({
+  indexName: 'multimodal_products',
+  dimension: 1024, // voyage-multimodal-3.5 dimension
+})
+
+// Generate multimodal embeddings
+const { embeddings } = await voyage.multimodal.doEmbed({
+  values: [
+    {
+      content: [
+        { type: 'text', text: 'Product description: Premium camera lens' },
+        { type: 'image_url', image_url: 'https://example.com/lens.jpg' },
+      ],
+    },
+  ],
+})
+
+// Store in MongoDB
+await mongoVector.upsert({
+  indexName: 'multimodal_products',
+  vectors: embeddings,
+  metadata: [
+    {
+      productId: 'lens-456',
+      category: 'photography',
+      price: 599.99,
+    },
+  ],
+})
+
+// Query with text
+const queryResult = await voyage.multimodal.doEmbed({
+  values: [
+    {
+      content: [{ type: 'text', text: 'camera lens for portraits' }],
+    },
+  ],
+})
+
+const results = await mongoVector.query({
+  indexName: 'multimodal_products',
+  queryVector: queryResult.embeddings[0],
+  topK: 5,
+})
+```
+
+#### Optimizing for retrieval with VoyageAI
+
+VoyageAI models support `inputType` optimization for document indexing and query search:
+
+```typescript title="src/mastra/vectors/mongodb-optimized-retrieval.ts"
+import { MongoDBVector } from '@mastra/mongodb'
+import { voyageEmbedding } from '@mastra/voyageai'
+
+const mongoVector = new MongoDBVector({
+  id: 'mongodb-vector',
+  uri: process.env.MONGODB_URI!,
+  dbName: process.env.MONGODB_DATABASE!,
+})
+
+// Use 'document' mode when indexing content
+const documentEmbedder = voyageEmbedding({
+  model: 'voyage-3.5',
+  inputType: 'document',
+})
+
+const docEmbeddings = await documentEmbedder.doEmbed({
+  values: documents.map(doc => doc.text),
+})
+
+await mongoVector.upsert({
+  indexName: 'documents',
+  vectors: docEmbeddings.embeddings,
+  metadata: documents.map(doc => ({ text: doc.text, id: doc.id })),
+})
+
+// Use 'query' mode when searching
+const queryEmbedder = voyageEmbedding({
+  model: 'voyage-3.5',
+  inputType: 'query',
+})
+
+const queryEmbedding = await queryEmbedder.doEmbed({
+  values: ['search query'],
+})
+
+const results = await mongoVector.query({
+  indexName: 'documents',
+  queryVector: queryEmbedding.embeddings[0],
+  topK: 10,
+})
+```
+
 ## Related
 
 - [Metadata Filters](../rag/metadata-filters)
+- [VoyageAI Embeddings Documentation](/models/embeddings#voyageai)

@@ -185,6 +185,107 @@ await vectorStore.upsert({
 })
 ```
 
+### Using VoyageAI with MongoDB
+
+VoyageAI provides specialized embedding models optimized for different use cases. Here's how to use VoyageAI embeddings with MongoDB Atlas Vector Search:
+
+```ts title="voyageai-mongodb-integration.ts"
+import { voyage } from '@mastra/voyageai'
+import { MongoDBVector } from '@mastra/mongodb'
+import { MDocument } from '@mastra/rag'
+
+// Initialize MongoDB vector store
+const mongoVector = new MongoDBVector({
+  id: 'mongodb-vector',
+  uri: process.env.MONGODB_URI,
+  dbName: process.env.MONGODB_DATABASE,
+})
+
+// Create index with VoyageAI's default dimension (1024)
+await mongoVector.createIndex({
+  indexName: 'documents',
+  dimension: 1024, // voyage-3.5 default dimension
+})
+
+// Process document
+const doc = MDocument.fromText(`Your document content here...`)
+const chunks = await doc.chunk({
+  strategy: 'recursive',
+  maxSize: 512,
+  overlap: 50,
+})
+
+// Generate embeddings with VoyageAI
+const { embeddings } = await voyage.doEmbed({
+  values: chunks.map(chunk => chunk.text),
+})
+
+// Store in MongoDB
+await mongoVector.upsert({
+  indexName: 'documents',
+  vectors: embeddings,
+  metadata: chunks.map(chunk => ({ text: chunk.text })),
+})
+```
+
+VoyageAI offers specialized models for different scenarios:
+
+```ts title="voyageai-specialized-models.ts"
+import { voyage } from '@mastra/voyageai'
+
+// Use voyage-code for code embeddings
+const codeEmbeddings = await voyage.code.doEmbed({
+  values: ['function hello() { return "world"; }'],
+})
+
+// Use voyage-3-large for higher quality embeddings (1536 dimensions)
+const largeEmbeddings = await voyage.large.doEmbed({
+  values: chunks.map(chunk => chunk.text),
+})
+
+// Use voyage-4 for highest throughput (320k batch tokens)
+const v4Embeddings = await voyage.v4.doEmbed({
+  values: chunks.map(chunk => chunk.text),
+})
+```
+
+For multimodal embeddings (text + images) with MongoDB:
+
+```ts title="voyageai-multimodal-mongodb.ts"
+import { voyage } from '@mastra/voyageai'
+import { MongoDBVector } from '@mastra/mongodb'
+
+// Initialize MongoDB for multimodal embeddings
+const mongoVector = new MongoDBVector({
+  id: 'mongodb-multimodal',
+  uri: process.env.MONGODB_URI,
+  dbName: process.env.MONGODB_DATABASE,
+})
+
+await mongoVector.createIndex({
+  indexName: 'multimodal_content',
+  dimension: 1024, // voyage-multimodal-3.5 dimension
+})
+
+// Embed text and image together
+const { embeddings } = await voyage.multimodal.doEmbed({
+  values: [
+    {
+      content: [
+        { type: 'text', text: 'Product description: High quality camera' },
+        { type: 'image_url', image_url: 'https://example.com/camera.jpg' },
+      ],
+    },
+  ],
+})
+
+await mongoVector.upsert({
+  indexName: 'multimodal_content',
+  vectors: embeddings,
+  metadata: [{ productId: 'cam-123', type: 'product' }],
+})
+```
+
 ##
 
 For more examples of different chunking strategies and embedding configurations, see:
