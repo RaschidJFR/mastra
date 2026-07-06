@@ -219,55 +219,7 @@ await storage.close()
 
 ## Vector search capabilities
 
-MongoDB storage includes built-in vector search capabilities for AI applications:
-
-### Vector Index Creation
-
-```typescript
-import { MongoDBVector } from '@mastra/mongodb'
-
-const vectorStore = new MongoDBVector({
-  id: 'mongodb-vector',
-  uri: process.env.MONGODB_URI,
-  dbName: process.env.MONGODB_DB_NAME,
-})
-
-// Create a vector index for embeddings
-await vectorStore.createIndex({
-  indexName: 'document_embeddings',
-  dimension: 1536,
-})
-```
-
-### Vector Operations
-
-```typescript prettier:false
-// Store vectors with metadata
-await vectorStore.upsert({
-  indexName: "document_embeddings",
-  vectors: [
-    {
-      id: "doc-1",
-      values: [0.1, 0.2, 0.3, ...], // 1536-dimensional vector
-      metadata: {
-        title: "Document Title",
-        category: "technical",
-        source: "api-docs",
-      },
-    },
-  ],
-});
-
-// Similarity search
-const results = await vectorStore.query({
-  indexName: "document_embeddings",
-  vector: queryEmbedding,
-  topK: 5,
-  filter: {
-    category: "technical",
-  },
-});
-```
+MongoDB storage includes built-in vector search capabilities for AI applications. For detailed vector operations including index creation, upserting embeddings, similarity search, and metadata filtering, see the [MongoDB vector reference](/reference/vectors/mongodb).
 
 ## Usage example
 
