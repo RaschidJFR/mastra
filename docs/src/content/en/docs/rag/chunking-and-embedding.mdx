@@ -238,7 +238,7 @@ const codeEmbeddings = await voyage.code.doEmbed({
   values: ['function hello() { return "world"; }'],
 })
 
-// Use voyage-3-large for higher quality embeddings (1536 dimensions)
+// Use voyage-3-large for higher quality embeddings (1024 dimensions default)
 const largeEmbeddings = await voyage.large.doEmbed({
   values: chunks.map(chunk => chunk.text),
 })
