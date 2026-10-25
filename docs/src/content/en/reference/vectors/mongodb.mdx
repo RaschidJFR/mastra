@@ -555,6 +555,179 @@ const results = await store.hybridQuery({
 
 `hybridQuery()` requires MongoDB 8.0 or later for the `$rankFusion` stage, which is generally available from 8.1. On 8.0.x, the stage runs where enabled, including MongoDB Atlas, but enablement may require a support case. If your deployment is older or lacks `$rankFusion`, run `query()` and `textQuery()` separately before merging the results client-side.
 
+### `hybridSearch()`
+
+Fuses vector and full-text results with separate retrieval limits. Optional native reranking refines the fused ranking before the final `topK` limit. Existing `query()`, `textQuery()`, and `hybridQuery()` calls don't change.
+
+This method uses the same `$rankFusion` requirements and registered indexes as [`hybridQuery()`](#hybridquery). For bring-your-own collections, register a full-text index with `createSearchIndex()` or pass `text.searchIndexName`.
+
+Native [`$rerank`](https://www.mongodb.com/docs/vector-search/query/aggregation-stages/rerank/) requires Atlas running MongoDB 9.0 or later with **Native Reranking** enabled in the project's settings. The default `rerank-3` model is in Preview and requires a dedicated M10-or-higher cluster. Self-managed and Atlas Local deployments don't support native reranking. No separate Voyage AI client or application-side API key is required.
+
+With an initialized `store`, registered indexes, a caller-generated `embedding`, and text stored in `metadata.text`, retrieve candidates and rerank them in one call:
+
+```typescript
+const results = await store.hybridSearch({
+  indexName: 'articles',
+  vector: { queryVector: embedding, limit: 50, numCandidates: 1000 },
+  text: { query: question, paths: ['metadata.text'], limit: 50 },
+  rerank: { query: question, paths: ['metadata.text'], numDocsToRerank: 50 },
+  topK: 5,
+})
+```
+
+Each retrieval branch contributes up to its own `limit` documents. `$rerank` evaluates up to `numDocsToRerank` fused documents, then `topK` limits the response. The reranker receives source documents before projection, so `rerank.paths` refers to fields in the original collection, including for bring-your-own collections.
+
+On an `autoEmbed` index, use `vector.query` instead of `vector.queryVector`. Omit `rerank` to return fused results without reranking:
+
+```typescript
+const results = await store.hybridSearch({
+  indexName: 'articles_auto',
+  vector: { query: question, limit: 50 },
+  text: { query: question, paths: ['document'], limit: 50 },
+  topK: 5,
+})
+```
+
+<PropertiesTable
+  content={[
+  {
+    name: 'indexName',
+    type: 'string',
+    description: 'Logical Mastra index identifying the collection and registered search indexes.',
+  },
+  {
+    name: 'topK',
+    type: 'number',
+    isOptional: true,
+    defaultValue: '10',
+    description: 'Final result limit after fusion and optional reranking. Integer from 1 to 10000.',
+  },
+  {
+    name: 'filter',
+    type: 'MongoDBVectorFilter',
+    isOptional: true,
+    description:
+      'Filter applied to both retrieval branches before fusion. Targets metadata fields in field mode and source fields in document mode. Uses the same vector filter pushdown or candidate-ID fallback as hybridQuery().',
+  },
+  {
+    name: 'weights',
+    type: '{ vector?: number; text?: number }',
+    isOptional: true,
+    description:
+      'Finite, non-negative fusion weights. Each omitted weight defaults to 1. At least one must be positive.',
+  },
+  {
+    name: 'metadataMode',
+    type: "'field' | 'document'",
+    isOptional: true,
+    defaultValue: 'field',
+    description:
+      'field returns managed metadata and document fields. document returns the source document as metadata, excluding the configured embedding field.',
+  },
+  {
+    name: 'vector',
+    type: 'object',
+    description: 'Vector retrieval configuration. Supply exactly one of queryVector or query.',
+  },
+  {
+    name: 'vector.queryVector',
+    type: 'number[]',
+    isOptional: true,
+    description: 'Non-empty, finite caller-generated embedding. Mutually exclusive with vector.query and vector.model.',
+  },
+  {
+    name: 'vector.query',
+    type: 'string',
+    isOptional: true,
+    description: 'Non-empty text for MongoDB to embed. Requires an autoEmbed index and is independent of text.query.',
+  },
+  {
+    name: 'vector.model',
+    type: 'string',
+    isOptional: true,
+    description:
+      'Query embedding model override. Requires vector.query and must be compatible with the index model. Independent of rerank.model.',
+  },
+  {
+    name: 'vector.limit',
+    type: 'number',
+    isOptional: true,
+    defaultValue: 'min(10000, max(4 * topK, 20))',
+    description: 'Maximum vector results contributed to fusion. Integer from 1 to 10000.',
+  },
+  {
+    name: 'vector.numCandidates',
+    type: 'number',
+    isOptional: true,
+    defaultValue: 'min(10000, max(vector.limit, 20 * topK))',
+    description:
+      'Vector search candidates. Integer from 1 to 10000. Values below the resolved vector.limit are raised to that limit with a warning.',
+  },
+  {
+    name: 'text',
+    type: 'object',
+    description: 'Full-text retrieval configuration, independent of vector retrieval.',
+  },
+  {
+    name: 'text.query',
+    type: 'string',
+    description: 'Non-empty full-text query.',
+  },
+  {
+    name: 'text.paths',
+    type: 'string[]',
+    description: 'Non-empty array of indexed source field paths for full-text matching.',
+  },
+  {
+    name: 'text.searchIndexName',
+    type: 'string',
+    isOptional: true,
+    description: 'Override the registered physical full-text search index for this call.',
+  },
+  {
+    name: 'text.limit',
+    type: 'number',
+    isOptional: true,
+    defaultValue: 'min(10000, max(4 * topK, 20))',
+    description: 'Maximum text results contributed to fusion. Integer from 1 to 10000.',
+  },
+  {
+    name: 'rerank',
+    type: 'object',
+    isOptional: true,
+    description: 'Enable native reranking after fusion. Omit for hybrid retrieval only. An empty object is invalid.',
+  },
+  {
+    name: 'rerank.query',
+    type: 'string',
+    description: 'Required when rerank is supplied. Non-empty relevance query, independent of both retrieval queries.',
+  },
+  {
+    name: 'rerank.paths',
+    type: 'string[]',
+    description:
+      'Required when rerank is supplied. Non-empty array of source fields used to judge relevance. MongoDB returns an error if any candidate document lacks a specified field.',
+  },
+  {
+    name: 'rerank.model',
+    type: 'string',
+    isOptional: true,
+    defaultValue: 'rerank-3',
+    description: 'Native reranking model, independent of the embedding model. MongoDB determines model availability.',
+  },
+  {
+    name: 'rerank.numDocsToRerank',
+    type: 'number',
+    description:
+      'Required when rerank is supplied. Maximum fused documents to rerank and return before topK. Integer from 1 to 1000.',
+  },
+]}
+/>
+
+Returns `QueryResult[]` in final relevance order. `score` is the native reranking score when reranking is enabled, or the fusion score otherwise. These scores use different scales.
+
+Invalid requests throw `MastraError`. Server failures preserve their causes, including unavailable reranking, unsupported models, and missing source fields. The method never silently substitutes a model or skips reranking.
+
 ### `describeIndex()`
 
 Returns information about the index (collection).

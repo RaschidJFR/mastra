@@ -63,6 +63,65 @@ export interface MongoDBQueryVectorParams extends QueryVectorParams<MongoDBVecto
   metadataMode?: 'field' | 'document';
 }
 
+/** Retrieval and optional native reranking options for {@link MongoDBVector.hybridSearch}. */
+export interface MongoDBHybridSearchParams {
+  /** Logical Mastra index, resolving the collection and its registered search indexes. */
+  indexName: string;
+  /** Final result limit, applied after fusion and optional reranking. Integer from 1 to 10000; defaults to 10. */
+  topK?: number;
+  /** Metadata filter applied to both retrieval branches before fusion. */
+  filter?: MongoDBVectorFilter;
+  /** Non-negative, finite fusion weights. Each omitted weight defaults to 1; at least one must be positive. */
+  weights?: { vector?: number; text?: number };
+  /** Return managed fields (default) or the source document as metadata, excluding its embedding. */
+  metadataMode?: 'field' | 'document';
+  /** Vector retrieval using either a caller-generated embedding or text for an autoEmbed index. */
+  vector: (
+    | {
+        /** Caller-generated embedding. Mutually exclusive with query and model. */
+        queryVector: number[];
+        query?: never;
+        model?: never;
+      }
+    | {
+        /** Non-empty text for MongoDB to embed. Requires an autoEmbed index. */
+        query: string;
+        queryVector?: never;
+        /** Query embedding model override, independent of the reranking model. */
+        model?: string;
+      }
+  ) & {
+    /** Candidates considered by vector search, from 1 to 10000. Defaults to min(10000, max(limit, 20 * topK)).
+     * Values below the vector limit are raised to that limit with a warning.
+     */
+    numCandidates?: number;
+    /** Vector results contributed to fusion, from 1 to 10000. Defaults to min(10000, max(4 * topK, 20)). */
+    limit?: number;
+  };
+  /** Full-text (BM25) retrieval, configured independently of vector retrieval. */
+  text: {
+    /** Non-empty full-text query. */
+    query: string;
+    /** Non-empty array of indexed source field paths to search. */
+    paths: string[];
+    /** Override the registered physical full-text search index for this call. */
+    searchIndexName?: string;
+    /** Text results contributed to fusion, from 1 to 10000. Defaults to min(10000, max(4 * topK, 20)). */
+    limit?: number;
+  };
+  /** Enable native $rerank after fusion. Omit to return fused results without reranking. */
+  rerank?: {
+    /** Non-empty query used to judge relevance, independent of both retrieval queries. */
+    query: string;
+    /** Non-empty array of source field paths. Missing document fields cause a server error. */
+    paths: string[];
+    /** Native reranking model. Defaults to 'rerank-3'; never changes the embedding model. */
+    model?: string;
+    /** Maximum fused documents to rerank and return before topK. Required integer from 1 to 1000. */
+    numDocsToRerank: number;
+  };
+}
+
 /**
  * Automated Embedding configuration. MongoDB embeds the text at `path` when documents are
  * written, and embeds a `queryText` string at query time, using the same model.
@@ -1357,6 +1416,200 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
         },
         error,
       );
+    }
+  }
+
+  /**
+   * Fuse vector and full-text results with independent retrieval limits and optional native
+   * reranking. Returns QueryResult[] with the final fusion or reranking score.
+   *
+   * Requires $rankFusion support (MongoDB >= 8.0 where enabled, generally available from 8.1).
+   * Reranking requires Atlas MongoDB >= 9.0 with Native Reranking enabled; the default
+   * rerank-3 model requires an M10-or-higher dedicated cluster and is in Preview.
+   * Atlas Local and self-managed deployments do not support native reranking.
+   *
+   * @throws {MastraError} Invalid inputs, incompatible indexes, or server failures. Server
+   * errors retain their causes; reranking is never silently skipped or substituted.
+   */
+  async hybridSearch(params: MongoDBHybridSearchParams): Promise<QueryResult[]> {
+    this.validateHybridSearchParams(params);
+    const { indexName, vector, text, rerank, topK = 10, filter, weights, metadataMode = 'field' } = params;
+    const defaultLimit = Math.min(10000, Math.max(topK * 4, 20));
+    const vectorLimit = vector.limit ?? defaultLimit;
+    const textLimit = text.limit ?? defaultLimit;
+    const candidates = Math.max(vectorLimit, vector.numCandidates ?? Math.min(10000, topK * 20));
+    if (vector.numCandidates !== undefined && vector.numCandidates < vectorLimit) {
+      this.logger.warn('hybridSearch: vector.numCandidates is below vector.limit; raising it to vector.limit.', {
+        indexName,
+        numCandidates: vector.numCandidates,
+        limit: vectorLimit,
+      });
+    }
+
+    try {
+      await this.assertRankFusionSupported();
+      const { collectionName, searchIndexName, autoEmbed } = await this.resolveIndexTarget(indexName);
+      if (vector.query !== undefined && !autoEmbed) {
+        throw new MastraError({
+          id: createVectorErrorId('MONGODB', 'HYBRID_SEARCH', 'NOT_AUTO_EMBED'),
+          text: `Index "${indexName}" was not created with autoEmbed. Supply vector.queryVector instead of vector.query.`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.USER,
+          details: { indexName },
+        });
+      }
+      const textIndex = text.searchIndexName ?? (await this.resolveTextSearchIndexName(indexName));
+      const collection = await this.getCollection(collectionName, true);
+      const metadataFilter = this.transformMetadataFilter(this.transformFilter(filter), metadataMode);
+      const hasMetadataFilter = Object.keys(metadataFilter).length > 0;
+      const vectorSearch: Document = {
+        index: searchIndexName,
+        path: autoEmbed ? autoEmbed.path : this.embeddingFieldName,
+        ...(vector.query !== undefined ? { query: { text: vector.query } } : { queryVector: vector.queryVector }),
+        ...(vector.model !== undefined ? { model: vector.model } : {}),
+        numCandidates: candidates,
+        limit: vectorLimit,
+      };
+
+      // Use the same pushdown/fallback rules as query() and hybridQuery(), including BYO fields.
+      if (hasMetadataFilter) {
+        let declaredPaths: Set<string>;
+        try {
+          declaredPaths = await this.getDeclaredFilterPaths(indexName);
+        } catch {
+          declaredPaths = new Set();
+        }
+        if (this.canPushDownFilter(metadataFilter, declaredPaths)) {
+          vectorSearch.filter = metadataFilter;
+        } else {
+          const candidateIds = await collection
+            .aggregate([{ $match: metadataFilter }, { $project: { _id: 1 } }])
+            .map(doc => doc._id)
+            .toArray();
+          if (candidateIds.length === 0) return [];
+          vectorSearch.filter = { _id: { $in: candidateIds } };
+        }
+      }
+
+      const pipeline: Document[] = [
+        {
+          $rankFusion: {
+            input: {
+              pipelines: {
+                vector: [{ $vectorSearch: vectorSearch }],
+                text: [
+                  { $search: { index: textIndex, text: { query: text.query, path: text.paths } } },
+                  ...(hasMetadataFilter ? [{ $match: metadataFilter }] : []),
+                  { $limit: textLimit },
+                ],
+              },
+            },
+            ...(weights ? { combination: { weights: { vector: weights.vector ?? 1, text: weights.text ?? 1 } } } : {}),
+          },
+        },
+        ...(rerank
+          ? [
+              {
+                $rerank: {
+                  query: { text: rerank.query },
+                  path: rerank.paths,
+                  model: rerank.model ?? 'rerank-3',
+                  numDocsToRerank: rerank.numDocsToRerank,
+                },
+              },
+            ]
+          : []),
+        { $limit: topK },
+        // Both stages publish $meta: 'score'. Project only after reranking so it sees source fields.
+        ...this.buildProjection(metadataMode, false, 'score', autoEmbed?.path),
+      ];
+      const rows = await collection.aggregate(pipeline).toArray();
+      return rows.map((row: Document) => ({
+        id: this.idToString(row._id),
+        score: typeof row.score === 'number' ? row.score : 0,
+        metadata: row.metadata,
+        document: row.document,
+      }));
+    } catch (error) {
+      if (error instanceof MastraError && error.category === ErrorCategory.USER) throw error;
+      throw new MastraError(
+        {
+          id: createVectorErrorId('MONGODB', 'HYBRID_SEARCH', 'FAILED'),
+          text: rerank
+            ? 'hybridSearch with native $rerank failed. Check Atlas Native Reranking support, model availability, and that rerank.paths exist in every candidate document.'
+            : 'hybridSearch failed. Check the collection, search indexes, and $rankFusion support.',
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { indexName },
+        },
+        error,
+      );
+    }
+  }
+
+  private validateHybridSearchParams(params: MongoDBHybridSearchParams): void {
+    const fail = (text: string): never => {
+      throw new MastraError({
+        id: createVectorErrorId('MONGODB', 'HYBRID_SEARCH', 'INVALID_ARGS'),
+        text,
+        domain: ErrorDomain.STORAGE,
+        category: ErrorCategory.USER,
+      });
+    };
+    const nonEmptyString = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
+    const integer = (value: unknown, name: string, max = 10000) => {
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > max) {
+        fail(`${name} must be an integer from 1 to ${max}.`);
+      }
+    };
+    const paths = (value: unknown, name: string) => {
+      if (!Array.isArray(value) || value.length === 0 || !value.every(nonEmptyString)) {
+        fail(`${name} must be a non-empty array of non-empty field paths.`);
+      }
+    };
+    if (!params || !nonEmptyString(params.indexName)) fail('indexName must be a non-empty string.');
+    const { vector, text, rerank, weights } = params;
+    if (!vector || typeof vector !== 'object') fail('vector retrieval configuration is required.');
+    if ((vector.queryVector !== undefined) === (vector.query !== undefined)) {
+      fail('Supply exactly one of vector.queryVector or vector.query.');
+    }
+    if (vector.queryVector !== undefined) {
+      if (
+        !Array.isArray(vector.queryVector) ||
+        vector.queryVector.length === 0 ||
+        !vector.queryVector.every(value => typeof value === 'number' && Number.isFinite(value))
+      ) {
+        fail('vector.queryVector must be a non-empty array of finite numbers.');
+      }
+    } else if (!nonEmptyString(vector.query)) fail('vector.query must be a non-empty string.');
+    if (vector.model !== undefined && (vector.query === undefined || !nonEmptyString(vector.model))) {
+      fail('vector.model must be a non-empty string and requires vector.query.');
+    }
+    if (!text || !nonEmptyString(text.query)) fail('text.query must be a non-empty string.');
+    paths(text.paths, 'text.paths');
+    if (text.searchIndexName !== undefined && !nonEmptyString(text.searchIndexName)) {
+      fail('text.searchIndexName must be a non-empty string.');
+    }
+    if (params.topK !== undefined) integer(params.topK, 'topK');
+    if (vector.limit !== undefined) integer(vector.limit, 'vector.limit');
+    if (text.limit !== undefined) integer(text.limit, 'text.limit');
+    if (vector.numCandidates !== undefined) integer(vector.numCandidates, 'vector.numCandidates');
+    if (params.metadataMode !== undefined && !['field', 'document'].includes(params.metadataMode)) {
+      fail('metadataMode must be field or document.');
+    }
+    if (weights !== undefined) {
+      if (!weights || typeof weights !== 'object') fail('weights must be an object.');
+      const values = [weights.vector ?? 1, weights.text ?? 1];
+      if (values.some(value => typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
+        fail('weights.vector and weights.text must be finite, non-negative numbers.');
+      }
+      if (values.every(value => value === 0)) fail('At least one fusion weight must be positive.');
+    }
+    if (rerank !== undefined) {
+      if (!rerank || !nonEmptyString(rerank.query)) fail('rerank.query must be a non-empty string.');
+      paths(rerank.paths, 'rerank.paths');
+      integer(rerank.numDocsToRerank, 'rerank.numDocsToRerank', 1000);
+      if (rerank.model !== undefined && !nonEmptyString(rerank.model)) fail('rerank.model must be a non-empty string.');
     }
   }
 
