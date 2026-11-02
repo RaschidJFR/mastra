@@ -63,8 +63,35 @@ export interface MongoDBQueryVectorParams extends QueryVectorParams<MongoDBVecto
   metadataMode?: 'field' | 'document';
 }
 
-/** Retrieval and optional native reranking options for {@link MongoDBVector.hybridSearch}. */
-export interface MongoDBHybridSearchParams {
+/** Flat options for {@link MongoDBVector.hybridQuery}, sharing one limit across both branches. */
+export interface MongoDBHybridQueryParams {
+  indexName: string;
+  /** Query embedding for the vector branch. Supply this or `queryText`, not both. */
+  queryVector?: number[];
+  /**
+   * Text for MongoDB to embed server-side for the vector branch. autoEmbed indexes only.
+   * Independent of `query`, so the two branches can search for different things.
+   */
+  queryText?: string;
+  /**
+   * Embedding model for the vector branch, overriding the index's. Requires `queryText`
+   * and must be compatible with the index's model.
+   */
+  model?: string;
+  /** Full-text (BM25) term for the text branch. */
+  query: string;
+  paths: string[];
+  topK?: number;
+  filter?: MongoDBVectorFilter;
+  weights?: { vector?: number; text?: number };
+  numCandidates?: number;
+  metadataMode?: 'field' | 'document';
+  /** Override the resolved full-text search index name for this call. */
+  textSearchIndexName?: string;
+}
+
+/** Per-branch retrieval and optional native reranking options for {@link MongoDBVector.hybridQuery}. */
+export interface MongoDBHybridQueryBranchParams {
   /** Logical Mastra index, resolving the collection and its registered search indexes. */
   indexName: string;
   /** Final result limit, applied after fusion and optional reranking. Integer from 1 to 10000; defaults to 10. */
@@ -1256,31 +1283,24 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
    * (see {@link assertRankFusionSupported}: generally available from 8.1; on 8.0.x it may
    * need a MongoDB support case to enable, and runs where enabled, e.g. Atlas 8.0.x).
    */
-  async hybridQuery(params: {
-    indexName: string;
-    /** Query embedding for the vector branch. Supply this or `queryText`, not both. */
-    queryVector?: number[];
-    /**
-     * Text for MongoDB to embed server-side for the vector branch. autoEmbed indexes only.
-     * Independent of `query`, so the two branches can search for different things.
-     */
-    queryText?: string;
-    /**
-     * Embedding model for the vector branch, overriding the index's. Requires `queryText`
-     * and must be compatible with the index's model.
-     */
-    model?: string;
-    /** Full-text (BM25) term for the text branch. */
-    query: string;
-    paths: string[];
-    topK?: number;
-    filter?: MongoDBVectorFilter;
-    weights?: { vector?: number; text?: number };
-    numCandidates?: number;
-    metadataMode?: 'field' | 'document';
-    /** Override the resolved full-text search index name for this call. */
-    textSearchIndexName?: string;
-  }): Promise<QueryResult[]> {
+  hybridQuery(params: MongoDBHybridQueryParams): Promise<QueryResult[]>;
+  /**
+   * Fuse vector and full-text results with independent retrieval limits and optional native
+   * reranking. Returns QueryResult[] with the final fusion or reranking score.
+   *
+   * Requires $rankFusion support (MongoDB >= 8.0 where enabled, generally available from 8.1).
+   * Reranking requires Atlas MongoDB >= 9.0 with Native Reranking enabled; the default
+   * rerank-3 model requires an M10-or-higher dedicated cluster and is in Preview.
+   * Atlas Local and self-managed deployments do not support native reranking.
+   *
+   * @throws {MastraError} Invalid inputs, incompatible indexes, or server failures. Server
+   * errors retain their causes; reranking is never silently skipped or substituted.
+   */
+  hybridQuery(params: MongoDBHybridQueryBranchParams): Promise<QueryResult[]>;
+  async hybridQuery(params: MongoDBHybridQueryParams | MongoDBHybridQueryBranchParams): Promise<QueryResult[]> {
+    if ('vector' in params || 'text' in params) {
+      return this.hybridQueryBranches(params as MongoDBHybridQueryBranchParams);
+    }
     const {
       indexName,
       queryVector,
@@ -1335,9 +1355,6 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     }
     const textIndex = textSearchIndexName ?? (await this.resolveTextSearchIndexName(indexName));
     try {
-      const collection = await this.getCollection(collectionName, true);
-      const metadataFilter = this.transformMetadataFilter(this.transformFilter(filter), metadataMode);
-      const hasMetadataFilter = Object.keys(metadataFilter).length > 0;
       // The branch limit is also capped at 10000: $vectorSearch requires numCandidates >= limit,
       // and numCandidates is itself capped at 10000, so perBranch must not exceed it or a large
       // topK (> 2500, where topK*4 > 10000) would make numCandidates < limit and error.
@@ -1345,68 +1362,23 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
       // numCandidates must be >= the branch limit (perBranch), or $vectorSearch errors
       // server-side. Floor at perBranch (not topK), keep the 10000 cap. (FIX 3)
       const candidates = Math.min(10000, Math.max(perBranch, numCandidates ?? topK * 20));
-
-      const vectorSearch: Document = {
-        index: searchIndexName,
-        path: autoEmbed ? autoEmbed.path : this.embeddingFieldName,
-        ...(queryText ? { query: { text: queryText } } : { queryVector }),
-        ...(model ? { model } : {}),
-        numCandidates: candidates,
-        limit: perBranch,
-      };
-
-      // Apply the metadata filter to the vector branch using the same pushdown-vs-fallback
-      // logic as query(): pass the filter straight to $vectorSearch only when every field is
-      // a declared filter field and every operator is supported; otherwise materialise
-      // matching _ids via $match and filter by _id. This avoids a hard $vectorSearch error
-      // on BYO collections whose metadata fields are typically not declared as filter fields.
-      if (hasMetadataFilter) {
-        let declaredPaths: Set<string>;
-        try {
-          declaredPaths = await this.getDeclaredFilterPaths(indexName);
-        } catch {
-          declaredPaths = new Set();
-        }
-        if (this.canPushDownFilter(metadataFilter, declaredPaths)) {
-          vectorSearch.filter = metadataFilter;
-        } else {
-          const candidateIds = await collection
-            .aggregate([{ $match: metadataFilter }, { $project: { _id: 1 } }])
-            .map(doc => doc._id)
-            .toArray();
-          if (candidateIds.length === 0) return [];
-          vectorSearch.filter = { _id: { $in: candidateIds } };
-        }
-      }
-
-      const textPipeline: Document[] = [
-        { $search: { index: textIndex, text: { query, path: paths } } },
-        ...(hasMetadataFilter ? [{ $match: metadataFilter }] : []),
-        { $limit: perBranch },
-      ];
-
-      const combination = weights ? { weights: { vector: weights.vector ?? 1, text: weights.text ?? 1 } } : undefined;
-      const pipeline: Document[] = [
-        {
-          $rankFusion: {
-            input: { pipelines: { vector: [{ $vectorSearch: vectorSearch }], text: textPipeline } },
-            ...(combination ? { combination } : {}),
-          },
+      return await this.runHybridPipeline({
+        indexName,
+        collectionName,
+        searchIndexName,
+        autoEmbed,
+        metadataMode,
+        filter,
+        weights,
+        topK,
+        vector: {
+          ...(queryText ? { query: queryText } : { queryVector }),
+          ...(model ? { model } : {}),
+          numCandidates: candidates,
+          limit: perBranch,
         },
-        { $limit: Math.min(10000, topK) },
-        // $rankFusion places its Reciprocal Rank Fusion score in the `score` metadata field
-        // (NOT `searchScore`, which is the text-branch score and is absent on vector-only hits).
-        // Score is projected via $meta inside buildProjection (not a preceding $set) so it
-        // never pollutes `metadata: '$$ROOT'` in document mode.
-        ...this.buildProjection(metadataMode, false, 'score', autoEmbed?.path),
-      ];
-      const rows = await collection.aggregate(pipeline).toArray();
-      return rows.map((r: any) => ({
-        id: this.idToString(r._id),
-        score: typeof r.score === 'number' ? r.score : 0,
-        metadata: r.metadata,
-        document: r.document,
-      }));
+        text: { query, paths, searchIndexName: textIndex, limit: perBranch },
+      });
     } catch (error: any) {
       throw new MastraError(
         {
@@ -1419,27 +1391,15 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     }
   }
 
-  /**
-   * Fuse vector and full-text results with independent retrieval limits and optional native
-   * reranking. Returns QueryResult[] with the final fusion or reranking score.
-   *
-   * Requires $rankFusion support (MongoDB >= 8.0 where enabled, generally available from 8.1).
-   * Reranking requires Atlas MongoDB >= 9.0 with Native Reranking enabled; the default
-   * rerank-3 model requires an M10-or-higher dedicated cluster and is in Preview.
-   * Atlas Local and self-managed deployments do not support native reranking.
-   *
-   * @throws {MastraError} Invalid inputs, incompatible indexes, or server failures. Server
-   * errors retain their causes; reranking is never silently skipped or substituted.
-   */
-  async hybridSearch(params: MongoDBHybridSearchParams): Promise<QueryResult[]> {
-    this.validateHybridSearchParams(params);
+  private async hybridQueryBranches(params: MongoDBHybridQueryBranchParams): Promise<QueryResult[]> {
+    this.validateHybridQueryBranchParams(params);
     const { indexName, vector, text, rerank, topK = 10, filter, weights, metadataMode = 'field' } = params;
     const defaultLimit = Math.min(10000, Math.max(topK * 4, 20));
     const vectorLimit = vector.limit ?? defaultLimit;
     const textLimit = text.limit ?? defaultLimit;
     const candidates = Math.max(vectorLimit, vector.numCandidates ?? Math.min(10000, topK * 20));
     if (vector.numCandidates !== undefined && vector.numCandidates < vectorLimit) {
-      this.logger.warn('hybridSearch: vector.numCandidates is below vector.limit; raising it to vector.limit.', {
+      this.logger.warn('hybridQuery: vector.numCandidates is below vector.limit; raising it to vector.limit.', {
         indexName,
         numCandidates: vector.numCandidates,
         limit: vectorLimit,
@@ -1451,7 +1411,7 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
       const { collectionName, searchIndexName, autoEmbed } = await this.resolveIndexTarget(indexName);
       if (vector.query !== undefined && !autoEmbed) {
         throw new MastraError({
-          id: createVectorErrorId('MONGODB', 'HYBRID_SEARCH', 'NOT_AUTO_EMBED'),
+          id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'NOT_AUTO_EMBED'),
           text: `Index "${indexName}" was not created with autoEmbed. Supply vector.queryVector instead of vector.query.`,
           domain: ErrorDomain.STORAGE,
           category: ErrorCategory.USER,
@@ -1459,85 +1419,27 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
         });
       }
       const textIndex = text.searchIndexName ?? (await this.resolveTextSearchIndexName(indexName));
-      const collection = await this.getCollection(collectionName, true);
-      const metadataFilter = this.transformMetadataFilter(this.transformFilter(filter), metadataMode);
-      const hasMetadataFilter = Object.keys(metadataFilter).length > 0;
-      const vectorSearch: Document = {
-        index: searchIndexName,
-        path: autoEmbed ? autoEmbed.path : this.embeddingFieldName,
-        ...(vector.query !== undefined ? { query: { text: vector.query } } : { queryVector: vector.queryVector }),
-        ...(vector.model !== undefined ? { model: vector.model } : {}),
-        numCandidates: candidates,
-        limit: vectorLimit,
-      };
-
-      // Use the same pushdown/fallback rules as query() and hybridQuery(), including BYO fields.
-      if (hasMetadataFilter) {
-        let declaredPaths: Set<string>;
-        try {
-          declaredPaths = await this.getDeclaredFilterPaths(indexName);
-        } catch {
-          declaredPaths = new Set();
-        }
-        if (this.canPushDownFilter(metadataFilter, declaredPaths)) {
-          vectorSearch.filter = metadataFilter;
-        } else {
-          const candidateIds = await collection
-            .aggregate([{ $match: metadataFilter }, { $project: { _id: 1 } }])
-            .map(doc => doc._id)
-            .toArray();
-          if (candidateIds.length === 0) return [];
-          vectorSearch.filter = { _id: { $in: candidateIds } };
-        }
-      }
-
-      const pipeline: Document[] = [
-        {
-          $rankFusion: {
-            input: {
-              pipelines: {
-                vector: [{ $vectorSearch: vectorSearch }],
-                text: [
-                  { $search: { index: textIndex, text: { query: text.query, path: text.paths } } },
-                  ...(hasMetadataFilter ? [{ $match: metadataFilter }] : []),
-                  { $limit: textLimit },
-                ],
-              },
-            },
-            ...(weights ? { combination: { weights: { vector: weights.vector ?? 1, text: weights.text ?? 1 } } } : {}),
-          },
-        },
-        ...(rerank
-          ? [
-              {
-                $rerank: {
-                  query: { text: rerank.query },
-                  path: rerank.paths,
-                  model: rerank.model ?? 'rerank-3',
-                  numDocsToRerank: rerank.numDocsToRerank,
-                },
-              },
-            ]
-          : []),
-        { $limit: topK },
-        // Both stages publish $meta: 'score'. Project only after reranking so it sees source fields.
-        ...this.buildProjection(metadataMode, false, 'score', autoEmbed?.path),
-      ];
-      const rows = await collection.aggregate(pipeline).toArray();
-      return rows.map((row: Document) => ({
-        id: this.idToString(row._id),
-        score: typeof row.score === 'number' ? row.score : 0,
-        metadata: row.metadata,
-        document: row.document,
-      }));
+      return await this.runHybridPipeline({
+        indexName,
+        collectionName,
+        searchIndexName,
+        autoEmbed,
+        metadataMode,
+        filter,
+        weights,
+        topK,
+        vector: { ...vector, numCandidates: candidates, limit: vectorLimit },
+        text: { query: text.query, paths: text.paths, searchIndexName: textIndex, limit: textLimit },
+        rerank,
+      });
     } catch (error) {
       if (error instanceof MastraError && error.category === ErrorCategory.USER) throw error;
       throw new MastraError(
         {
-          id: createVectorErrorId('MONGODB', 'HYBRID_SEARCH', 'FAILED'),
+          id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'FAILED'),
           text: rerank
-            ? 'hybridSearch with native $rerank failed. Check Atlas Native Reranking support, model availability, and that rerank.paths exist in every candidate document.'
-            : 'hybridSearch failed. Check the collection, search indexes, and $rankFusion support.',
+            ? 'hybridQuery with native $rerank failed. Check Atlas Native Reranking support, model availability, and that rerank.paths exist in every candidate document.'
+            : 'hybridQuery failed. Check the collection, search indexes, and $rankFusion support.',
           domain: ErrorDomain.STORAGE,
           category: ErrorCategory.THIRD_PARTY,
           details: { indexName },
@@ -1547,10 +1449,116 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     }
   }
 
-  private validateHybridSearchParams(params: MongoDBHybridSearchParams): void {
+  /** Builds and runs the $rankFusion pipeline shared by both hybridQuery shapes. */
+  private async runHybridPipeline({
+    indexName,
+    collectionName,
+    searchIndexName,
+    autoEmbed,
+    metadataMode,
+    filter,
+    weights,
+    topK,
+    vector,
+    text,
+    rerank,
+  }: {
+    indexName: string;
+    collectionName: string;
+    searchIndexName: string;
+    autoEmbed?: IndexTarget['autoEmbed'];
+    metadataMode: 'field' | 'document';
+    filter?: MongoDBVectorFilter;
+    weights?: { vector?: number; text?: number };
+    topK: number;
+    vector: { queryVector?: number[]; query?: string; model?: string; numCandidates: number; limit: number };
+    text: { query: string; paths: string[]; searchIndexName: string; limit: number };
+    rerank?: MongoDBHybridQueryBranchParams['rerank'];
+  }): Promise<QueryResult[]> {
+    const collection = await this.getCollection(collectionName, true);
+    const metadataFilter = this.transformMetadataFilter(this.transformFilter(filter), metadataMode);
+    const hasMetadataFilter = Object.keys(metadataFilter).length > 0;
+    const vectorSearch: Document = {
+      index: searchIndexName,
+      path: autoEmbed ? autoEmbed.path : this.embeddingFieldName,
+      ...(vector.query !== undefined ? { query: { text: vector.query } } : { queryVector: vector.queryVector }),
+      ...(vector.model !== undefined ? { model: vector.model } : {}),
+      numCandidates: vector.numCandidates,
+      limit: vector.limit,
+    };
+
+    // Apply the metadata filter to the vector branch using the same pushdown-vs-fallback
+    // logic as query(): pass the filter straight to $vectorSearch only when every field is
+    // a declared filter field and every operator is supported; otherwise materialise
+    // matching _ids via $match and filter by _id. This avoids a hard $vectorSearch error
+    // on BYO collections whose metadata fields are typically not declared as filter fields.
+    if (hasMetadataFilter) {
+      let declaredPaths: Set<string>;
+      try {
+        declaredPaths = await this.getDeclaredFilterPaths(indexName);
+      } catch {
+        declaredPaths = new Set();
+      }
+      if (this.canPushDownFilter(metadataFilter, declaredPaths)) {
+        vectorSearch.filter = metadataFilter;
+      } else {
+        const candidateIds = await collection
+          .aggregate([{ $match: metadataFilter }, { $project: { _id: 1 } }])
+          .map(doc => doc._id)
+          .toArray();
+        if (candidateIds.length === 0) return [];
+        vectorSearch.filter = { _id: { $in: candidateIds } };
+      }
+    }
+
+    const pipeline: Document[] = [
+      {
+        $rankFusion: {
+          input: {
+            pipelines: {
+              vector: [{ $vectorSearch: vectorSearch }],
+              text: [
+                { $search: { index: text.searchIndexName, text: { query: text.query, path: text.paths } } },
+                ...(hasMetadataFilter ? [{ $match: metadataFilter }] : []),
+                { $limit: text.limit },
+              ],
+            },
+          },
+          ...(weights ? { combination: { weights: { vector: weights.vector ?? 1, text: weights.text ?? 1 } } } : {}),
+        },
+      },
+      ...(rerank
+        ? [
+            {
+              $rerank: {
+                query: { text: rerank.query },
+                path: rerank.paths,
+                model: rerank.model ?? 'rerank-3',
+                numDocsToRerank: rerank.numDocsToRerank,
+              },
+            },
+          ]
+        : []),
+      { $limit: Math.min(10000, topK) },
+      // $rankFusion and $rerank both publish their score as `$meta: 'score'` (NOT `searchScore`,
+      // which is the text-branch score and is absent on vector-only hits). Score is projected via
+      // $meta inside buildProjection (not a preceding $set) so it never pollutes
+      // `metadata: '$$ROOT'` in document mode, and only after reranking so $rerank sees source fields.
+      ...this.buildProjection(metadataMode, false, 'score', autoEmbed?.path),
+    ];
+    const rows = await collection.aggregate(pipeline).toArray();
+    return rows.map((row: Document) => ({
+      id: this.idToString(row._id),
+      score: typeof row.score === 'number' ? row.score : 0,
+      metadata: row.metadata,
+      document: row.document,
+    }));
+  }
+
+  private validateHybridQueryBranchParams(params: MongoDBHybridQueryBranchParams): void {
     const fail = (text: string): never => {
       throw new MastraError({
-        id: createVectorErrorId('MONGODB', 'HYBRID_SEARCH', 'INVALID_ARGS'),
+        id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'INVALID_ARGS'),
         text,
         domain: ErrorDomain.STORAGE,
         category: ErrorCategory.USER,

@@ -2,10 +2,10 @@ import { createVectorTestSuite } from '@internal/storage-test-utils';
 import { MongoClient, ObjectId } from 'mongodb';
 import { vi, describe, it, expect, beforeAll, afterAll, test } from 'vitest';
 import { MongoDBVector } from './';
-import type { MongoDBCreateIndexParams, MongoDBHybridSearchParams } from './';
+import type { MongoDBCreateIndexParams, MongoDBHybridQueryBranchParams } from './';
 
-describe('MongoDBVector hybridSearch input validation (NODE-7937)', () => {
-  const request: MongoDBHybridSearchParams = {
+describe('MongoDBVector hybridQuery branch input validation (NODE-7937)', () => {
+  const request: MongoDBHybridQueryBranchParams = {
     indexName: 'articles',
     vector: { queryVector: [1, 0], limit: 50 },
     text: { query: 'password reset', paths: ['metadata.text'] },
@@ -75,7 +75,7 @@ describe('MongoDBVector hybridSearch input validation (NODE-7937)', () => {
       options: { serverSelectionTimeoutMS: 50 },
     });
     try {
-      await expect(store.hybridSearch({ ...request, ...overrides } as MongoDBHybridSearchParams)).rejects.toThrow(
+      await expect(store.hybridQuery({ ...request, ...overrides } as MongoDBHybridQueryBranchParams)).rejects.toThrow(
         message,
       );
     } finally {
@@ -3389,14 +3389,14 @@ if (nativeRerankEnabled && !nativeRerankUrl) {
   throw new Error('TEST_MONGODB_RERANKING=1 requires MONGODB_RERANK_URL to be set to an Atlas connection string.');
 }
 
-type HybridSearchTestOverrides = Omit<Partial<MongoDBHybridSearchParams>, 'vector' | 'text'> & {
-  vector?: Pick<MongoDBHybridSearchParams['vector'], 'limit' | 'numCandidates'>;
-  text?: Partial<MongoDBHybridSearchParams['text']>;
+type HybridQueryBranchTestOverrides = Omit<Partial<MongoDBHybridQueryBranchParams>, 'vector' | 'text'> & {
+  vector?: Pick<MongoDBHybridQueryBranchParams['vector'], 'limit' | 'numCandidates'>;
+  text?: Partial<MongoDBHybridQueryBranchParams['text']>;
 };
 
 // Only provisioning depends on collection ownership and embedding mode. Tests below
 // share the same behavior checks without branching on deployment capabilities.
-function useHybridSearchCollection({
+function useHybridQueryCollection({
   url,
   ownership,
   automatic = false,
@@ -3406,7 +3406,7 @@ function useHybridSearchCollection({
   automatic?: boolean;
 }) {
   const isByo = ownership === 'BYO';
-  const indexName = `hybrid_search_${ownership.toLowerCase()}_${automatic}_${new ObjectId().toHexString()}`;
+  const indexName = `hybrid_query_${ownership.toLowerCase()}_${automatic}_${new ObjectId().toHexString()}`;
   const collectionName = isByo ? `${indexName}_source` : indexName;
   const path = isByo ? 'note' : 'metadata.text';
   const metadataMode = isByo ? 'document' : 'field';
@@ -3426,8 +3426,8 @@ function useHybridSearchCollection({
   let lastPipeline: any[];
 
   // Merge branch options so each test supplies only the settings it exercises.
-  const search = (overrides: HybridSearchTestOverrides = {}) =>
-    store.hybridSearch({
+  const search = (overrides: HybridQueryBranchTestOverrides = {}) =>
+    store.hybridQuery({
       indexName,
       metadataMode,
       ...overrides,
@@ -3488,7 +3488,7 @@ function useHybridSearchCollection({
       store,
       indexName,
       async () => {
-        const results = await store.hybridSearch({
+        const results = await store.hybridQuery({
           indexName,
           metadataMode,
           vector: automatic ? { query: 'pay an overdue invoice' } : { queryVector: [1, 0, 0, 0] },
@@ -3532,9 +3532,9 @@ function useHybridSearchCollection({
   };
 }
 
-type HybridSearchCollection = ReturnType<typeof useHybridSearchCollection>;
+type HybridQueryCollection = ReturnType<typeof useHybridQueryCollection>;
 
-function testHybridSearchRetrieval(fixture: HybridSearchCollection) {
+function testHybridQueryBranchRetrieval(fixture: HybridQueryCollection) {
   const { search, ids, articles } = fixture;
 
   it('fuses independently limited branches and returns source metadata with final scores', async () => {
@@ -3595,10 +3595,10 @@ function testHybridSearchRetrieval(fixture: HybridSearchCollection) {
   });
 }
 
-function testOrdinaryVectorIndex(fixture: HybridSearchCollection) {
+function testOrdinaryVectorIndex(fixture: HybridQueryCollection) {
   it('rejects automatic query embedding on an ordinary vector index', async () => {
     await expect(
-      fixture.store.hybridSearch({
+      fixture.store.hybridQuery({
         indexName: fixture.indexName,
         vector: { query: 'reset password' },
         text: { query: 'invoice', paths: [fixture.path] },
@@ -3607,7 +3607,7 @@ function testOrdinaryVectorIndex(fixture: HybridSearchCollection) {
   });
 }
 
-function testNativeReranking(fixture: HybridSearchCollection) {
+function testNativeReranking(fixture: HybridQueryCollection) {
   const { search, ids, path } = fixture;
 
   it('reranks fused candidates before topK and projects the native score', async () => {
@@ -3647,37 +3647,40 @@ function testNativeReranking(fixture: HybridSearchCollection) {
   });
 }
 
-describe.each(['managed', 'BYO'] as const)('MongoDBVector hybridSearch Atlas Local %s (NODE-7937)', ownership => {
-  const fixture = useHybridSearchCollection({ url: uri, ownership });
-  testHybridSearchRetrieval(fixture);
-  testOrdinaryVectorIndex(fixture);
+describe.each(['managed', 'BYO'] as const)(
+  'MongoDBVector hybridQuery branches Atlas Local %s (NODE-7937)',
+  ownership => {
+    const fixture = useHybridQueryCollection({ url: uri, ownership });
+    testHybridQueryBranchRetrieval(fixture);
+    testOrdinaryVectorIndex(fixture);
 
-  it('preserves the server error when native reranking is unavailable, without fallback', async () => {
-    await expect(
-      fixture.search({ rerank: { query: 'reset password', paths: [fixture.path], numDocsToRerank: 3 } }),
-    ).rejects.toMatchObject({
-      category: 'THIRD_PARTY',
-      message: expect.stringContaining('native $rerank failed'),
-      cause: { message: expect.stringMatching(/rerank/i) },
+    it('preserves the server error when native reranking is unavailable, without fallback', async () => {
+      await expect(
+        fixture.search({ rerank: { query: 'reset password', paths: [fixture.path], numDocsToRerank: 3 } }),
+      ).rejects.toMatchObject({
+        category: 'THIRD_PARTY',
+        message: expect.stringContaining('native $rerank failed'),
+        cause: { message: expect.stringMatching(/rerank/i) },
+      });
     });
-  });
-});
+  },
+);
 
 // Atlas Local's pinned image cannot generate embeddings. Register these tests as
 // skipped rather than silently omitting unsupported coverage.
 describe.skip.each(['managed', 'BYO'] as const)(
-  'MongoDBVector hybridSearch Atlas Local automatic embeddings %s (unsupported by pinned image)',
+  'MongoDBVector hybridQuery branches Atlas Local automatic embeddings %s (unsupported by pinned image)',
   ownership => {
-    const fixture = useHybridSearchCollection({ url: uri, ownership, automatic: true });
-    testHybridSearchRetrieval(fixture);
+    const fixture = useHybridQueryCollection({ url: uri, ownership, automatic: true });
+    testHybridQueryBranchRetrieval(fixture);
   },
 );
 
 describe.skipIf(!nativeRerankEnabled).each(['managed', 'BYO'] as const)(
-  'MongoDBVector hybridSearch Atlas native reranking %s (NODE-7937)',
+  'MongoDBVector hybridQuery branches Atlas native reranking %s (NODE-7937)',
   ownership => {
-    const fixture = useHybridSearchCollection({ url: nativeRerankUrl, ownership });
-    testHybridSearchRetrieval(fixture);
+    const fixture = useHybridQueryCollection({ url: nativeRerankUrl, ownership });
+    testHybridQueryBranchRetrieval(fixture);
     testOrdinaryVectorIndex(fixture);
     testNativeReranking(fixture);
 
@@ -3699,14 +3702,14 @@ describe.skipIf(!nativeRerankEnabled).each(['managed', 'BYO'] as const)(
 );
 
 describe.skipIf(!nativeRerankEnabled).each(['managed', 'BYO'] as const)(
-  'MongoDBVector hybridSearch Atlas native reranking automatic embeddings %s (NODE-7937)',
+  'MongoDBVector hybridQuery branches Atlas native reranking automatic embeddings %s (NODE-7937)',
   ownership => {
-    const fixture = useHybridSearchCollection({ url: nativeRerankUrl, ownership, automatic: true });
-    testHybridSearchRetrieval(fixture);
+    const fixture = useHybridQueryCollection({ url: nativeRerankUrl, ownership, automatic: true });
+    testHybridQueryBranchRetrieval(fixture);
     testNativeReranking(fixture);
 
     it('keeps the embedding model independent of an explicit reranking model', async () => {
-      const results = await fixture.store.hybridSearch({
+      const results = await fixture.store.hybridQuery({
         indexName: fixture.indexName,
         metadataMode: fixture.metadataMode,
         vector: { query: 'pay an overdue invoice', model: 'voyage-4-lite' },

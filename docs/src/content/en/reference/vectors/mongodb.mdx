@@ -1,12 +1,12 @@
 ---
-title: "Reference: MongoDB vector store | Vectors"
-description: "The MongoDBVector class provides vector search using MongoDB Vector Search. It enables efficient similarity search and metadata filtering within your MongoDB collections."
+title: 'Reference: MongoDB vector store | Vectors'
+description: 'The MongoDBVector class provides vector search using MongoDB Vector Search. It enables efficient similarity search and metadata filtering within your MongoDB collections.'
 packages:
-  - "@mastra/core"
-  - "@mastra/fastembed"
-  - "@mastra/memory"
-  - "@mastra/mongodb"
-  - "@mastra/voyageai"
+  - '@mastra/core'
+  - '@mastra/fastembed'
+  - '@mastra/memory'
+  - '@mastra/mongodb'
+  - '@mastra/voyageai'
 ---
 
 # MongoDB vector store
@@ -555,18 +555,18 @@ const results = await store.hybridQuery({
 
 `hybridQuery()` requires MongoDB 8.0 or later for the `$rankFusion` stage, which is generally available from 8.1. On 8.0.x, the stage runs where enabled, including MongoDB Atlas, but enablement may require a support case. If your deployment is older or lacks `$rankFusion`, run `query()` and `textQuery()` separately before merging the results client-side.
 
-### `hybridSearch()`
+#### Per-branch options and native reranking
 
-Fuses vector and full-text results with separate retrieval limits. Optional native reranking refines the fused ranking before the final `topK` limit. Existing `query()`, `textQuery()`, and `hybridQuery()` calls don't change.
+`hybridQuery()` also accepts separate `vector` and `text` options. Use this form to set a different retrieval limit for each branch, and optionally rerank the fused results before the final `topK` limit. Existing calls that use the parameters above don't change.
 
-This method uses the same `$rankFusion` requirements and registered indexes as [`hybridQuery()`](#hybridquery). For bring-your-own collections, register a full-text index with `createSearchIndex()` or pass `text.searchIndexName`.
+This form has the same `$rankFusion` requirements and registered indexes. For bring-your-own collections, register a full-text index with `createSearchIndex()` or pass `text.searchIndexName`.
 
 Native [`$rerank`](https://www.mongodb.com/docs/vector-search/query/aggregation-stages/rerank/) requires Atlas running MongoDB 9.0 or later with **Native Reranking** enabled in the project's settings. The default `rerank-3` model is in Preview and requires a dedicated M10-or-higher cluster. Self-managed and Atlas Local deployments don't support native reranking. No separate Voyage AI client or application-side API key is required.
 
 With an initialized `store`, registered indexes, a caller-generated `embedding`, and text stored in `metadata.text`, retrieve candidates and rerank them in one call:
 
 ```typescript
-const results = await store.hybridSearch({
+const results = await store.hybridQuery({
   indexName: 'articles',
   vector: { queryVector: embedding, limit: 50, numCandidates: 1000 },
   text: { query: question, paths: ['metadata.text'], limit: 50 },
@@ -580,7 +580,7 @@ Each retrieval branch contributes up to its own `limit` documents. `$rerank` eva
 On an `autoEmbed` index, use `vector.query` instead of `vector.queryVector`. Omit `rerank` to return fused results without reranking:
 
 ```typescript
-const results = await store.hybridSearch({
+const results = await store.hybridQuery({
   indexName: 'articles_auto',
   vector: { query: question, limit: 50 },
   text: { query: question, paths: ['document'], limit: 50 },
@@ -607,7 +607,7 @@ const results = await store.hybridSearch({
     type: 'MongoDBVectorFilter',
     isOptional: true,
     description:
-      'Filter applied to both retrieval branches before fusion. Targets metadata fields in field mode and source fields in document mode. Uses the same vector filter pushdown or candidate-ID fallback as hybridQuery().',
+      'Filter applied to both retrieval branches before fusion. Targets metadata fields in field mode and source fields in document mode. Uses the same vector filter pushdown or candidate-ID fallback as the flat form.',
   },
   {
     name: 'weights',
