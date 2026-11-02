@@ -142,8 +142,9 @@ export interface MongoDBHybridQueryBranchParams {
     /** Vector results contributed to fusion, from 1 to 10000. Defaults to min(10000, max(4 * topK, 20)). */
     limit?: number;
     /**
-     * Override the registered physical vector search index for this call. Filters then always use
-     * the pre-filter fallback, because declared filter fields are read from the registered index.
+     * Bring-your-own collections only: search this existing vector index instead of the registered
+     * one. Filters then always use the pre-filter fallback, because declared filter fields are read
+     * from the registered index. Rejected on managed indexes, which use their registered indexes.
      */
     searchIndexName?: string;
   };
@@ -153,7 +154,10 @@ export interface MongoDBHybridQueryBranchParams {
     query: string;
     /** Non-empty array of indexed field paths to search, relative to the document root (e.g. `metadata.text`). */
     paths: string[];
-    /** Override the registered physical full-text search index for this call. */
+    /**
+     * Bring-your-own collections only: search this existing full-text index instead of the
+     * registered one. Rejected on managed indexes, which use their registered indexes.
+     */
     searchIndexName?: string;
     /** Text results contributed to fusion, from 1 to 10000. Defaults to min(10000, max(4 * topK, 20)). */
     limit?: number;
@@ -1423,6 +1427,15 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     try {
       await this.assertRankFusionSupported();
       const { collectionName, searchIndexName, autoEmbed, isByo } = await this.resolveIndexTarget(indexName);
+      if (!isByo && (vector.searchIndexName !== undefined || text.searchIndexName !== undefined)) {
+        throw new MastraError({
+          id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'INVALID_ARGS'),
+          text: `vector.searchIndexName and text.searchIndexName are only supported for bring-your-own collections. Managed index "${indexName}" uses its registered search indexes.`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.USER,
+          details: { indexName },
+        });
+      }
       if (vector.query !== undefined && !autoEmbed) {
         throw new MastraError({
           id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'NOT_AUTO_EMBED'),

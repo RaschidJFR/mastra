@@ -3511,6 +3511,18 @@ async function cleanUp(store: MongoDBVector, indexName: string, byo: boolean) {
   await store.disconnect();
 }
 
+async function waitForSearchIndexesReady(collection: any, names: string[]) {
+  const ready = await waitForCondition(
+    async () => {
+      const indexes: any[] = await collection.listSearchIndexes().toArray();
+      return names.every(name => indexes.find(index => index.name === name)?.status === 'READY');
+    },
+    300000,
+    1000,
+  );
+  if (!ready) throw new Error(`Search indexes ${names.join(', ')} did not become ready`);
+}
+
 const ids = (results: { id: string }[]) => results.map(result => result.id);
 
 describe('hybridQuery per-branch options: managed collection (Atlas Local)', () => {
@@ -3547,7 +3559,16 @@ describe('hybridQuery per-branch options: managed collection (Atlas Local)', () 
   });
 
   it('returns the stored embedding with includeVector', async () => {
-    const [first] = await store.hybridQuery({
+    let [first] = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['document'] },
+      topK: 1,
+      includeVector: false,
+    });
+    expect(first.vector).toBeUndefined();
+
+    [first] = await store.hybridQuery({
       indexName,
       vector: { queryVector: [1, 0, 0, 0] },
       text: { query: 'password', paths: ['document'] },
@@ -3557,34 +3578,20 @@ describe('hybridQuery per-branch options: managed collection (Atlas Local)', () 
     expect(first.vector).toEqual(ARTICLE_VECTORS[0]);
   });
 
-  it('searches the vector index named in vector.searchIndexName', async () => {
-    const results = await store.hybridQuery({
+  it('rejects search index name overrides, which are for BYO collections only', async () => {
+    const withVectorOverride = store.hybridQuery({
       indexName,
-      vector: { queryVector: [1, 0, 0, 0], searchIndexName: 'no_such_vector_index' },
+      vector: { queryVector: [1, 0, 0, 0], searchIndexName: `${indexName}_vector_index` },
       text: { query: 'password', paths: ['document'] },
     });
-    // The named index doesn't exist, so only the text branch contributes.
-    expect(ids(results)).toEqual(['password-reset']);
-  });
+    await expect(withVectorOverride).rejects.toMatchObject({ category: 'USER', message: /bring-your-own/ });
 
-  it('searches the text index named in text.searchIndexName', async () => {
-    const results = await store.hybridQuery({
+    const withTextOverride = store.hybridQuery({
       indexName,
       vector: { queryVector: [1, 0, 0, 0] },
-      text: { query: 'password', paths: ['document'], searchIndexName: 'no_such_text_index' },
+      text: { query: 'password', paths: ['document'], searchIndexName: `${indexName}_search_index` },
     });
-    // The named index doesn't exist, so only the vector branch contributes.
-    expect(ids(results)).toEqual(['overdue-invoice', 'password-reset', 'spreadsheet-sort']);
-  });
-
-  it('still accepts the flat parameters', async () => {
-    const results = await store.hybridQuery({
-      indexName,
-      queryVector: [1, 0, 0, 0],
-      query: 'password',
-      paths: ['document'],
-    });
-    expect(ids(results)).toEqual(['password-reset', 'overdue-invoice', 'spreadsheet-sort']);
+    await expect(withTextOverride).rejects.toMatchObject({ category: 'USER', message: /bring-your-own/ });
   });
 });
 
@@ -3595,6 +3602,19 @@ describe('hybridQuery per-branch options: BYO collection (Atlas Local)', () => {
   beforeAll(async () => {
     await store.connect();
     await seedByo(store, indexName);
+    // Existing indexes the caller owns, alongside the registered ones, for the override tests.
+    const collection = store['db'].collection(`${indexName}_source`);
+    await collection.createSearchIndex({
+      name: `${indexName}_alt_vectors`,
+      type: 'vectorSearch',
+      definition: { fields: [{ type: 'vector', path: 'embedding', numDimensions: 2, similarity: 'cosine' }] },
+    });
+    await collection.createSearchIndex({
+      name: `${indexName}_alt_text`,
+      type: 'search',
+      definition: { mappings: { dynamic: false, fields: { note: { type: 'string', analyzer: 'lucene.keyword' } } } },
+    });
+    await waitForSearchIndexesReady(collection, [`${indexName}_alt_vectors`, `${indexName}_alt_text`]);
     await waitUntilSearchable(store, indexName, { queryVector: [1, 0, 0, 0] }, 'note');
   }, 600000);
   afterAll(() => cleanUp(store, indexName, true));
@@ -3620,7 +3640,16 @@ describe('hybridQuery per-branch options: BYO collection (Atlas Local)', () => {
   });
 
   it('returns the stored embedding with includeVector', async () => {
-    const [first] = await store.hybridQuery({
+    let [first] = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['note'] },
+      topK: 1,
+      includeVector: false,
+    });
+    expect(first).not.toHaveProperty('vector');
+
+    [first] = await store.hybridQuery({
       indexName,
       vector: { queryVector: [1, 0, 0, 0] },
       text: { query: 'password', paths: ['note'] },
@@ -3631,21 +3660,51 @@ describe('hybridQuery per-branch options: BYO collection (Atlas Local)', () => {
   });
 
   it('searches the vector index named in vector.searchIndexName', async () => {
-    const results = await store.hybridQuery({
+    const registered = await store.hybridQuery({
       indexName,
-      vector: { queryVector: [1, 0, 0, 0], searchIndexName: 'no_such_vector_index' },
+      vector: { queryVector: [1, 0, 0, 0] },
       text: { query: 'password', paths: ['note'] },
     });
-    expect(ids(results)).toEqual(['password-reset']);
+    expect(ids(registered)).toEqual(['password-reset', 'overdue-invoice', 'spreadsheet-sort']);
+
+    // The alternate index declares 2 dimensions, so MongoDB rejects the 4-dimension query
+    // vector. It can only fail this way if the override reached that index.
+    const overridden = store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0], searchIndexName: `${indexName}_alt_vectors` },
+      text: { query: 'password', paths: ['note'] },
+    });
+    await expect(overridden).rejects.toMatchObject({ category: 'THIRD_PARTY', cause: { message: /dimension/i } });
   });
 
   it('searches the text index named in text.searchIndexName', async () => {
-    const results = await store.hybridQuery({
+    const registered = await store.hybridQuery({
       indexName,
       vector: { queryVector: [1, 0, 0, 0] },
-      text: { query: 'password', paths: ['note'], searchIndexName: 'no_such_text_index' },
+      text: { query: 'password', paths: ['note'] },
     });
-    expect(ids(results)).toEqual(['overdue-invoice', 'password-reset', 'spreadsheet-sort']);
+    // The registered index matches "password", so fusion moves "password-reset" first.
+    expect(ids(registered)).toEqual(['password-reset', 'overdue-invoice', 'spreadsheet-sort']);
+
+    // The alternate index keeps each note as one keyword token, so it matches a note only as a
+    // whole string. The vector branch ranks "spreadsheet-sort" last, so only a text match from
+    // the alternate index can put it first. Poll, because READY doesn't mean documents are indexed.
+    const wholeNote = () =>
+      store.hybridQuery({
+        indexName,
+        vector: { queryVector: [1, 0, 0, 0] },
+        text: { query: ARTICLES[2], paths: ['note'], searchIndexName: `${indexName}_alt_text` },
+      });
+    await waitForSync(store, indexName, async () => ids(await wholeNote())[0] === 'spreadsheet-sort', 30000, 1000);
+    expect(ids(await wholeNote())[0]).toBe('spreadsheet-sort');
+
+    // A single word matches nothing in the alternate index, so only the vector order remains.
+    const overridden = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['note'], searchIndexName: `${indexName}_alt_text` },
+    });
+    expect(ids(overridden)).toEqual(['overdue-invoice', 'password-reset', 'spreadsheet-sort']);
   });
 });
 
@@ -3657,7 +3716,7 @@ const RERANK_URL = process.env.MONGODB_RERANK_URL;
 const describeAtlas = RERANK_URL ? describe : describe.skip;
 const RERANK_QUERY = 'How do I reset my password?';
 
-describeAtlas('hybridQuery per-branch options: managed collection (Atlas)', () => {
+describeAtlas('hybridQuery native reranking: managed collection (Atlas)', () => {
   const indexName = `hq_atlas_managed_${Date.now()}`;
   let store: MongoDBVector;
 
@@ -3670,20 +3729,30 @@ describeAtlas('hybridQuery per-branch options: managed collection (Atlas)', () =
   afterAll(() => cleanUp(store, indexName, false));
 
   it('reranks the fused results', async () => {
-    const results = await store.hybridQuery({
+    const request = {
       indexName,
       vector: { queryVector: [1, 0, 0, 0] },
       text: { query: 'invoice', paths: ['document'] },
+      topK: 3,
+    };
+    const fused = await store.hybridQuery(request);
+    // Both branches favour "overdue-invoice", so fusion alone ranks it first.
+    expect(ids(fused)[0]).toBe('overdue-invoice');
+
+    const reranked = await store.hybridQuery({
+      ...request,
       rerank: { query: RERANK_QUERY, paths: ['document'], numDocsToRerank: 3 },
-      topK: 1,
     });
-    // Fusion alone ranks "overdue-invoice" first; the reranker moves "password-reset" up.
-    expect(ids(results)).toEqual(['password-reset']);
-    expect(results[0].score).toBeGreaterThan(0);
+    // The reranker judges relevance to the password question and moves "password-reset" first.
+    expect(ids(reranked)[0]).toBe('password-reset');
+    expect(new Set(ids(reranked))).toEqual(new Set(ids(fused)));
+    // $rerank replaces the fusion score with its own relevance score.
+    const fusedScore = fused.find(result => result.id === 'password-reset')!.score;
+    expect(reranked[0].score).not.toBe(fusedScore);
   });
 });
 
-describeAtlas('hybridQuery per-branch options: BYO collection (Atlas)', () => {
+describeAtlas('hybridQuery native reranking: BYO collection (Atlas)', () => {
   const indexName = `hq_atlas_byo_${Date.now()}`;
   let store: MongoDBVector;
 
@@ -3696,19 +3765,27 @@ describeAtlas('hybridQuery per-branch options: BYO collection (Atlas)', () => {
   afterAll(() => cleanUp(store, indexName, true));
 
   it('reranks the fused results', async () => {
-    const results = await store.hybridQuery({
+    const request = {
       indexName,
       vector: { queryVector: [1, 0, 0, 0] },
       text: { query: 'invoice', paths: ['note'] },
+      topK: 3,
+    };
+    const fused = await store.hybridQuery(request);
+    expect(ids(fused)[0]).toBe('overdue-invoice');
+
+    const reranked = await store.hybridQuery({
+      ...request,
       rerank: { query: RERANK_QUERY, paths: ['note'], numDocsToRerank: 3 },
-      topK: 1,
     });
-    expect(ids(results)).toEqual(['password-reset']);
-    expect(results[0].score).toBeGreaterThan(0);
+    expect(ids(reranked)[0]).toBe('password-reset');
+    expect(new Set(ids(reranked))).toEqual(new Set(ids(fused)));
+    const fusedScore = fused.find(result => result.id === 'password-reset')!.score;
+    expect(reranked[0].score).not.toBe(fusedScore);
   });
 });
 
-describeAtlas('hybridQuery per-branch options: managed collection with automatic embeddings (Atlas)', () => {
+describeAtlas('hybridQuery with automatic embeddings: managed collection (Atlas)', () => {
   const indexName = `hq_atlas_managed_auto_${Date.now()}`;
   let store: MongoDBVector;
 
@@ -3730,37 +3807,30 @@ describeAtlas('hybridQuery per-branch options: managed collection with automatic
   });
 
   it('reranks the fused results', async () => {
-    const results = await store.hybridQuery({
+    const request = {
       indexName,
       vector: { query: 'pay an overdue invoice' },
       text: { query: 'invoice', paths: ['document'] },
+      topK: 3,
+    };
+    const fused = await store.hybridQuery(request);
+    // Both branches favour "overdue-invoice", so fusion alone ranks it first.
+    expect(ids(fused)[0]).toBe('overdue-invoice');
+
+    const reranked = await store.hybridQuery({
+      ...request,
       rerank: { query: RERANK_QUERY, paths: ['document'], numDocsToRerank: 3 },
-      topK: 1,
     });
-    // Both branches favour "overdue-invoice"; the reranker moves "password-reset" up.
-    expect(ids(results)).toEqual(['password-reset']);
-  });
-
-  it('searches the vector index named in vector.searchIndexName', async () => {
-    const results = await store.hybridQuery({
-      indexName,
-      vector: { query: RERANK_QUERY, searchIndexName: 'no_such_vector_index' },
-      text: { query: 'password', paths: ['document'] },
-    });
-    expect(ids(results)).toEqual(['password-reset']);
-  });
-
-  it('searches the text index named in text.searchIndexName', async () => {
-    const results = await store.hybridQuery({
-      indexName,
-      vector: { query: RERANK_QUERY },
-      text: { query: 'password', paths: ['document'], searchIndexName: 'no_such_text_index' },
-    });
-    expect(results).toHaveLength(3);
+    // The reranker judges relevance to the password question and moves "password-reset" first.
+    expect(ids(reranked)[0]).toBe('password-reset');
+    expect(new Set(ids(reranked))).toEqual(new Set(ids(fused)));
+    // $rerank replaces the fusion score with its own relevance score.
+    const fusedScore = fused.find(result => result.id === 'password-reset')!.score;
+    expect(reranked[0].score).not.toBe(fusedScore);
   });
 });
 
-describeAtlas('hybridQuery per-branch options: BYO collection with automatic embeddings (Atlas)', () => {
+describeAtlas('hybridQuery with automatic embeddings: BYO collection (Atlas)', () => {
   const indexName = `hq_atlas_byo_auto_${Date.now()}`;
   let store: MongoDBVector;
 
@@ -3782,31 +3852,22 @@ describeAtlas('hybridQuery per-branch options: BYO collection with automatic emb
   });
 
   it('reranks the fused results', async () => {
-    const results = await store.hybridQuery({
+    const request = {
       indexName,
       vector: { query: 'pay an overdue invoice' },
       text: { query: 'invoice', paths: ['note'] },
+      topK: 3,
+    };
+    const fused = await store.hybridQuery(request);
+    expect(ids(fused)[0]).toBe('overdue-invoice');
+
+    const reranked = await store.hybridQuery({
+      ...request,
       rerank: { query: RERANK_QUERY, paths: ['note'], numDocsToRerank: 3 },
-      topK: 1,
     });
-    expect(ids(results)).toEqual(['password-reset']);
-  });
-
-  it('searches the vector index named in vector.searchIndexName', async () => {
-    const results = await store.hybridQuery({
-      indexName,
-      vector: { query: RERANK_QUERY, searchIndexName: 'no_such_vector_index' },
-      text: { query: 'password', paths: ['note'] },
-    });
-    expect(ids(results)).toEqual(['password-reset']);
-  });
-
-  it('searches the text index named in text.searchIndexName', async () => {
-    const results = await store.hybridQuery({
-      indexName,
-      vector: { query: RERANK_QUERY },
-      text: { query: 'password', paths: ['note'], searchIndexName: 'no_such_text_index' },
-    });
-    expect(results).toHaveLength(3);
+    expect(ids(reranked)[0]).toBe('password-reset');
+    expect(new Set(ids(reranked))).toEqual(new Set(ids(fused)));
+    const fusedScore = fused.find(result => result.id === 'password-reset')!.score;
+    expect(reranked[0].score).not.toBe(fusedScore);
   });
 });

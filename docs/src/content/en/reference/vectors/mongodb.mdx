@@ -671,7 +671,7 @@ const results = await store.hybridQuery({
     type: 'string',
     isOptional: true,
     description:
-      'Override the registered physical vector search index for this call. Filters then always use the candidate-ID fallback, because declared filter fields are read from the registered index.',
+      'Bring-your-own collections only. Search this existing vector index instead of the registered one. Filters then always use the candidate-ID fallback, because declared filter fields are read from the registered index. Managed indexes throw an error.',
   },
   {
     name: 'text',
@@ -692,7 +692,8 @@ const results = await store.hybridQuery({
     name: 'text.searchIndexName',
     type: 'string',
     isOptional: true,
-    description: 'Override the registered physical full-text search index for this call.',
+    description:
+      'Bring-your-own collections only. Search this existing full-text index instead of the registered one. Managed indexes throw an error.',
   },
   {
     name: 'text.limit',
