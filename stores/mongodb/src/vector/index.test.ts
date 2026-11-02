@@ -863,6 +863,70 @@ describe('MongoDBVector filterFields (#18587)', () => {
     });
   });
 
+  describe('hybridQuery per-branch push-down', () => {
+    const makeCursor = (docs: any[]) => ({
+      toArray: async () => docs,
+      map: (cb: (d: any) => any) => ({ toArray: async () => docs.map(cb) }),
+    });
+    const stubHybrid = (v: MongoDBVector, target: { isByo: boolean }, declared: string[]) => {
+      const aggregate = vi.fn().mockReturnValue(makeCursor([{ _id: 'a' }]));
+      vi.spyOn(v as any, 'getCollection').mockResolvedValue({ aggregate });
+      vi.spyOn(v as any, 'assertRankFusionSupported').mockResolvedValue(undefined);
+      vi.spyOn(v as any, 'resolveIndexTarget').mockResolvedValue({
+        collectionName: 'idx',
+        searchIndexName: 'idx_vector_index',
+        textSearchIndexName: 'idx_search_index',
+        ...target,
+      });
+      const getDeclaredFilterPaths = vi.spyOn(v as any, 'getDeclaredFilterPaths').mockResolvedValue(new Set(declared));
+      return { aggregate, getDeclaredFilterPaths };
+    };
+    // The search pipeline is the last aggregate; a fallback runs a $match aggregate before it.
+    const vectorSearchOf = (aggregate: ReturnType<typeof vi.fn>) =>
+      aggregate.mock.calls.at(-1)![0][0].$rankFusion.input.pipelines.vector[0].$vectorSearch;
+
+    it('passes a declared filter straight to $vectorSearch on the registered index', async () => {
+      const v = makeVector();
+      const { aggregate } = stubHybrid(v, { isByo: false }, ['metadata.category']);
+
+      await v.hybridQuery({
+        indexName: 'idx',
+        vector: { queryVector: [0.1, 0.2] },
+        text: { query: 'q', paths: ['document'] },
+        filter: { category: 'news' },
+      });
+
+      expect(aggregate).toHaveBeenCalledTimes(1);
+      expect(vectorSearchOf(aggregate).filter).toEqual({ 'metadata.category': 'news' });
+    });
+
+    it('falls back to candidate _ids when vector.searchIndexName overrides the vector index', async () => {
+      const v = makeVector();
+      // `category` is declared on the registered index, so without the override it is pushed down.
+      const { aggregate, getDeclaredFilterPaths } = stubHybrid(v, { isByo: true }, ['category']);
+      const request = {
+        indexName: 'idx',
+        text: { query: 'q', paths: ['note'] },
+        filter: { category: 'news' },
+      };
+
+      await v.hybridQuery({ ...request, vector: { queryVector: [0.1, 0.2] } });
+      expect(aggregate).toHaveBeenCalledTimes(1);
+      expect(vectorSearchOf(aggregate).filter).toEqual({ category: 'news' });
+
+      aggregate.mockClear();
+      getDeclaredFilterPaths.mockClear();
+      await v.hybridQuery({ ...request, vector: { queryVector: [0.1, 0.2], searchIndexName: 'alt_vectors' } });
+
+      // The declared fields belong to the registered index, so they aren't consulted for the override.
+      expect(getDeclaredFilterPaths).not.toHaveBeenCalled();
+      expect(aggregate).toHaveBeenCalledTimes(2);
+      expect(aggregate.mock.calls[0][0]).toEqual([{ $match: { category: 'news' } }, { $project: { _id: 1 } }]);
+      expect(vectorSearchOf(aggregate).index).toBe('alt_vectors');
+      expect(vectorSearchOf(aggregate).filter).toEqual({ _id: { $in: ['a'] } });
+    });
+  });
+
   describe('bring-your-own collection', () => {
     const opsCol = 'ops_txns';
     const idxName = 'txn_precedent';
@@ -3578,6 +3642,38 @@ describe('hybridQuery per-branch options: managed collection (Atlas Local)', () 
     expect(first.vector).toEqual(ARTICLE_VECTORS[0]);
   });
 
+  it('filters both branches before fusion', async () => {
+    // Unfiltered, the text branch returns only "password-reset" and the vector branch ranks
+    // "overdue-invoice" first. Only "spreadsheet-sort" survives if both branches are filtered.
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['document'] },
+      filter: { category: 'spreadsheet' },
+    });
+    expect(ids(results)).toEqual(['spreadsheet-sort']);
+  });
+
+  it('filters with query operators', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['document'] },
+      filter: { category: { $in: ['account', 'spreadsheet'] } },
+    });
+    expect(ids(results)).toEqual(['password-reset', 'spreadsheet-sort']);
+  });
+
+  it('returns nothing when the filter matches no documents', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['document'] },
+      filter: { category: 'no-such-category' },
+    });
+    expect(results).toEqual([]);
+  });
+
   it('rejects search index name overrides, which are for BYO collections only', async () => {
     const withVectorOverride = store.hybridQuery({
       indexName,
@@ -3659,6 +3755,37 @@ describe('hybridQuery per-branch options: BYO collection (Atlas Local)', () => {
     expect(first.vector).toEqual(ARTICLE_VECTORS[0]);
   });
 
+  it('filters both branches before fusion', async () => {
+    // BYO filters target source fields at the document root, not a managed `metadata` field.
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['note'] },
+      filter: { category: 'spreadsheet' },
+    });
+    expect(ids(results)).toEqual(['spreadsheet-sort']);
+  });
+
+  it('filters with query operators', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['note'] },
+      filter: { category: { $in: ['account', 'spreadsheet'] } },
+    });
+    expect(ids(results)).toEqual(['password-reset', 'spreadsheet-sort']);
+  });
+
+  it('returns nothing when the filter matches no documents', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['note'] },
+      filter: { category: 'no-such-category' },
+    });
+    expect(results).toEqual([]);
+  });
+
   it('searches the vector index named in vector.searchIndexName', async () => {
     const registered = await store.hybridQuery({
       indexName,
@@ -3709,19 +3836,24 @@ describe('hybridQuery per-branch options: BYO collection (Atlas Local)', () => {
 });
 
 // ─── hybridQuery against Atlas: native reranking and automatic embeddings ────────────────
-// Native reranking needs Atlas (MongoDB 9.0+, M10 or larger, Native Reranking enabled in the
-// project). Set MONGODB_RERANK_URL in stores/mongodb/.env to run these; skipped otherwise.
-// They consume Voyage AI reranking and embedding tokens.
-const RERANK_URL = process.env.MONGODB_RERANK_URL;
-const describeAtlas = RERANK_URL ? describe : describe.skip;
+// These run against an Atlas cluster and consume Voyage AI embedding and reranking tokens.
+// Set TEST_MONGODB_URI in stores/mongodb/.env to run them; skipped otherwise.
+// Native reranking also needs MongoDB 9.0+, M10 or larger, and Native Reranking enabled in the
+// project, so its tests need an explicit opt-in as well:
+//   TEST_RERANKER=1 pnpm --filter @mastra/mongodb test
+const ATLAS_URI = process.env.TEST_MONGODB_URI;
+const RERANKING_ENABLED = Boolean(ATLAS_URI) && process.env.TEST_RERANKER === '1';
+const describeAtlas = ATLAS_URI ? describe : describe.skip;
+const describeReranking = RERANKING_ENABLED ? describe : describe.skip;
+const itReranks = RERANKING_ENABLED ? it : it.skip;
 const RERANK_QUERY = 'How do I reset my password?';
 
-describeAtlas('hybridQuery native reranking: managed collection (Atlas)', () => {
+describeReranking('hybridQuery native reranking: managed collection (Atlas)', () => {
   const indexName = `hq_atlas_managed_${Date.now()}`;
   let store: MongoDBVector;
 
   beforeAll(async () => {
-    store = new MongoDBVector({ id: 'hq-atlas-managed', uri: RERANK_URL!, dbName });
+    store = new MongoDBVector({ id: 'hq-atlas-managed', uri: ATLAS_URI!, dbName });
     await store.connect();
     await seedManaged(store, indexName);
     await waitUntilSearchable(store, indexName, { queryVector: [1, 0, 0, 0] }, 'document');
@@ -3752,12 +3884,12 @@ describeAtlas('hybridQuery native reranking: managed collection (Atlas)', () => 
   });
 });
 
-describeAtlas('hybridQuery native reranking: BYO collection (Atlas)', () => {
+describeReranking('hybridQuery native reranking: BYO collection (Atlas)', () => {
   const indexName = `hq_atlas_byo_${Date.now()}`;
   let store: MongoDBVector;
 
   beforeAll(async () => {
-    store = new MongoDBVector({ id: 'hq-atlas-byo', uri: RERANK_URL!, dbName });
+    store = new MongoDBVector({ id: 'hq-atlas-byo', uri: ATLAS_URI!, dbName });
     await store.connect();
     await seedByo(store, indexName);
     await waitUntilSearchable(store, indexName, { queryVector: [1, 0, 0, 0] }, 'note');
@@ -3790,7 +3922,7 @@ describeAtlas('hybridQuery with automatic embeddings: managed collection (Atlas)
   let store: MongoDBVector;
 
   beforeAll(async () => {
-    store = new MongoDBVector({ id: 'hq-atlas-managed-auto', uri: RERANK_URL!, dbName });
+    store = new MongoDBVector({ id: 'hq-atlas-managed-auto', uri: ATLAS_URI!, dbName });
     await store.connect();
     await seedManaged(store, indexName, { autoEmbed: true });
     await waitUntilSearchable(store, indexName, { query: RERANK_QUERY }, 'document');
@@ -3806,7 +3938,7 @@ describeAtlas('hybridQuery with automatic embeddings: managed collection (Atlas)
     expect(ids(results)[0]).toBe('password-reset');
   });
 
-  it('reranks the fused results', async () => {
+  itReranks('reranks the fused results', async () => {
     const request = {
       indexName,
       vector: { query: 'pay an overdue invoice' },
@@ -3835,7 +3967,7 @@ describeAtlas('hybridQuery with automatic embeddings: BYO collection (Atlas)', (
   let store: MongoDBVector;
 
   beforeAll(async () => {
-    store = new MongoDBVector({ id: 'hq-atlas-byo-auto', uri: RERANK_URL!, dbName });
+    store = new MongoDBVector({ id: 'hq-atlas-byo-auto', uri: ATLAS_URI!, dbName });
     await store.connect();
     await seedByo(store, indexName, { autoEmbed: true });
     await waitUntilSearchable(store, indexName, { query: RERANK_QUERY }, 'note');
@@ -3851,7 +3983,7 @@ describeAtlas('hybridQuery with automatic embeddings: BYO collection (Atlas)', (
     expect(ids(results)[0]).toBe('password-reset');
   });
 
-  it('reranks the fused results', async () => {
+  itReranks('reranks the fused results', async () => {
     const request = {
       indexName,
       vector: { query: 'pay an overdue invoice' },
