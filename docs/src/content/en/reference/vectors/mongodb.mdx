@@ -661,7 +661,7 @@ const results = await store.hybridQuery({
     name: 'vector.numCandidates',
     type: 'number',
     isOptional: true,
-    defaultValue: 'min(10000, max(vector.limit, 20 * topK))',
+    defaultValue: 'min(10000, 20 * vector.limit)',
     description:
       'Vector search candidates. Integer from 1 to 10000. An explicit value is sent to MongoDB unchanged, which rejects a value below the resolved `vector.limit`.',
   },

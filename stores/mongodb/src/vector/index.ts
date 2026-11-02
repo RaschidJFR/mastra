@@ -131,7 +131,8 @@ export interface MongoDBHybridQueryBranchParams {
       }
   ) & {
     /**
-     * Candidates considered by vector search, from 1 to 10000. Defaults to min(10000, max(limit, 20 * topK)).
+     * Candidates considered by vector search, from 1 to 10000. Defaults to min(10000, 20 * limit),
+     * following MongoDB's recommendation of at least 20 times the vector limit.
      * An explicit value is sent to MongoDB unchanged, which rejects one below the vector limit.
      */
     numCandidates?: number;
@@ -1410,9 +1411,9 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     const defaultLimit = Math.min(10000, Math.max(topK * 4, 20));
     const vectorLimit = vector.limit ?? defaultLimit;
     const textLimit = text.limit ?? defaultLimit;
-    // Only the computed default is adjusted. An explicit numCandidates is sent as-is, so MongoDB
-    // reports an invalid value (for example, below the vector limit) instead of it being rewritten.
-    const candidates = vector.numCandidates ?? Math.max(vectorLimit, Math.min(10000, topK * 20));
+    // MongoDB recommends numCandidates of at least 20x the limit. An explicit value is sent as-is,
+    // so MongoDB reports an invalid one (for example, below the vector limit) instead of it being rewritten.
+    const candidates = vector.numCandidates ?? Math.min(10000, vectorLimit * 20);
 
     try {
       await this.assertRankFusionSupported();

@@ -3593,11 +3593,13 @@ function testHybridQueryBranchRetrieval(fixture: HybridQueryCollection) {
     expect(fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch.numCandidates).toBe(1);
   });
 
-  it('keeps the computed default numCandidates at or above the vector limit', async () => {
+  it('defaults numCandidates to 20x the vector limit, capped at 10000', async () => {
+    const numCandidates = () =>
+      fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch.numCandidates;
     await search({ vector: { limit: 50 }, topK: 1 });
-    expect(
-      fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch.numCandidates,
-    ).toBeGreaterThanOrEqual(50);
+    expect(numCandidates()).toBe(1000);
+    await search({ vector: { limit: 600 } });
+    expect(numCandidates()).toBe(10000);
   });
 }
 
