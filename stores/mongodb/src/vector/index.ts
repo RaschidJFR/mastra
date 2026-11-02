@@ -117,7 +117,10 @@ export interface MongoDBHybridQueryBranchParams {
   /** Vector retrieval using either a caller-generated embedding or text for an autoEmbed index. */
   vector: (
     | {
-        /** Caller-generated embedding. Mutually exclusive with query and model. */
+        /**
+         * Caller-generated embedding. Mutually exclusive with query and model. Not supported on
+         * autoEmbed indexes, which only accept query text; passing it there throws a USER error.
+         */
         queryVector: number[];
         query?: never;
         model?: never;
@@ -1307,11 +1310,8 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
    * Fuse vector and full-text results with independent retrieval limits and optional native
    * reranking. Returns QueryResult[] with the final fusion or reranking score.
    *
-   * Requires $rankFusion support (MongoDB >= 8.0 where enabled, generally available from 8.1).
-   * Reranking requires Atlas MongoDB >= 9.0 with Native Reranking enabled; the default
-   * rerank-3 model requires an M10-or-higher dedicated cluster and is in Preview.
-   * Atlas Local and self-managed deployments do not support native reranking.
-   *
+   * @see https://mastra.ai/reference/vectors/mongodb#per-branch-options-and-native-reranking
+   * @see https://www.mongodb.com/docs/vector-search/query/aggregation-stages/rerank/
    * @throws {MastraError} Invalid inputs, incompatible indexes, or server failures. Server
    * errors retain their causes; reranking is never silently skipped or substituted.
    */
@@ -1427,6 +1427,15 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
         throw new MastraError({
           id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'NOT_AUTO_EMBED'),
           text: `Index "${indexName}" was not created with autoEmbed. Supply vector.queryVector instead of vector.query.`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.USER,
+          details: { indexName },
+        });
+      }
+      if (vector.queryVector !== undefined && autoEmbed) {
+        throw new MastraError({
+          id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'INVALID_ARGS'),
+          text: `Index "${indexName}" was created with autoEmbed, so MongoDB only accepts query text for it. Supply vector.query instead of vector.queryVector.`,
           domain: ErrorDomain.STORAGE,
           category: ErrorCategory.USER,
           details: { indexName },

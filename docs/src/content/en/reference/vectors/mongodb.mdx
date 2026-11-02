@@ -635,7 +635,8 @@ const results = await store.hybridQuery({
     name: 'vector.queryVector',
     type: 'number[]',
     isOptional: true,
-    description: 'Non-empty, finite caller-generated embedding. Mutually exclusive with vector.query and vector.model.',
+    description:
+      'Non-empty, finite caller-generated embedding. Mutually exclusive with vector.query and vector.model. Not supported on `autoEmbed` indexes, which throw an error; use vector.query instead.',
   },
   {
     name: 'vector.query',

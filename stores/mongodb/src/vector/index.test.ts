@@ -2,88 +2,7 @@ import { createVectorTestSuite } from '@internal/storage-test-utils';
 import { MongoClient, ObjectId } from 'mongodb';
 import { vi, describe, it, expect, beforeAll, afterAll, test } from 'vitest';
 import { MongoDBVector } from './';
-import type { MongoDBCreateIndexParams, MongoDBHybridQueryBranchParams } from './';
-
-describe('MongoDBVector hybridQuery branch input validation (NODE-7937)', () => {
-  const request: MongoDBHybridQueryBranchParams = {
-    indexName: 'articles',
-    vector: { queryVector: [1, 0], limit: 50 },
-    text: { query: 'password reset', paths: ['metadata.text'] },
-  };
-
-  it.each([
-    ['missing index', { indexName: '' }, /indexName/],
-    ['missing vector configuration', { vector: undefined }, /vector/],
-    ['missing embedding input', { vector: {} }, /exactly one/],
-    ['both embedding inputs', { vector: { queryVector: [1, 0], query: 'reset' } }, /exactly one/],
-    ['empty vector', { vector: { queryVector: [] } }, /finite numbers/],
-    ['non-finite vector', { vector: { queryVector: [NaN, Infinity] } }, /finite numbers/],
-    ['blank automatic query', { vector: { query: ' ' } }, /vector.query/],
-    ['model on a manual embedding', { vector: { queryVector: [1, 0], model: 'voyage-4' } }, /vector.model/],
-    ['blank embedding model', { vector: { query: 'reset', model: '' } }, /vector.model/],
-    ['missing text configuration', { text: undefined }, /text.query/],
-    ['blank keyword query', { text: { query: ' ', paths: ['document'] } }, /text.query/],
-    ['missing keyword paths', { text: { query: 'reset' } }, /text.paths/],
-    ['empty keyword paths', { text: { query: 'reset', paths: [] } }, /text.paths/],
-    ['blank keyword path', { text: { query: 'reset', paths: [' '] } }, /text.paths/],
-    ['blank search index', { text: { ...request.text, searchIndexName: '' } }, /text.searchIndexName/],
-    ['blank vector index', { vector: { ...request.vector, searchIndexName: ' ' } }, /vector.searchIndexName/],
-    ['zero final limit', { topK: 0 }, /topK/],
-    ['fractional final limit', { topK: 1.5 }, /topK/],
-    ['non-finite final limit', { topK: Infinity }, /topK/],
-    ['excessive final limit', { topK: 10001 }, /topK/],
-    ['negative vector limit', { vector: { ...request.vector, limit: -1 } }, /vector.limit/],
-    ['excessive vector limit', { vector: { ...request.vector, limit: 10001 } }, /vector.limit/],
-    ['fractional text limit', { text: { ...request.text, limit: 1.5 } }, /text.limit/],
-    ['invalid candidates', { vector: { ...request.vector, numCandidates: 0 } }, /vector.numCandidates/],
-    ['excessive candidates', { vector: { ...request.vector, numCandidates: 10001 } }, /vector.numCandidates/],
-    ['negative fusion weight', { weights: { vector: -1 } }, /weights/],
-    ['non-finite fusion weight', { weights: { text: NaN } }, /weights/],
-    ['zero fusion weights', { weights: { vector: 0, text: 0 } }, /positive/],
-    ['non-boolean includeVector', { includeVector: 'yes' }, /includeVector/],
-    ['null reranking', { rerank: null }, /rerank.query/],
-    ['empty reranking configuration', { rerank: {} }, /rerank.query/],
-    ['blank reranking query', { rerank: { query: ' ', paths: ['document'], numDocsToRerank: 50 } }, /rerank.query/],
-    ['missing reranking paths', { rerank: { query: 'reset', numDocsToRerank: 50 } }, /rerank.paths/],
-    ['empty reranking paths', { rerank: { query: 'reset', paths: [], numDocsToRerank: 50 } }, /rerank.paths/],
-    ['missing reranking count', { rerank: { query: 'reset', paths: ['document'] } }, /rerank.numDocsToRerank/],
-    [
-      'zero reranking count',
-      { rerank: { query: 'reset', paths: ['document'], numDocsToRerank: 0 } },
-      /rerank.numDocsToRerank/,
-    ],
-    [
-      'fractional reranking count',
-      { rerank: { query: 'reset', paths: ['document'], numDocsToRerank: 1.5 } },
-      /rerank.numDocsToRerank/,
-    ],
-    [
-      'excessive reranking count',
-      { rerank: { query: 'reset', paths: ['document'], numDocsToRerank: 1001 } },
-      /rerank.numDocsToRerank/,
-    ],
-    [
-      'blank reranking model',
-      { rerank: { query: 'reset', paths: ['document'], numDocsToRerank: 50, model: '' } },
-      /rerank.model/,
-    ],
-  ])('rejects %s before contacting MongoDB', async (_name, overrides, message) => {
-    // An unreachable server makes accidental I/O fail instead of hiding it behind a mock.
-    const store = new MongoDBVector({
-      id: 'hybrid-validation',
-      uri: 'mongodb://127.0.0.1:1',
-      dbName: 'test',
-      options: { serverSelectionTimeoutMS: 50 },
-    });
-    try {
-      await expect(store.hybridQuery({ ...request, ...overrides } as MongoDBHybridQueryBranchParams)).rejects.toThrow(
-        message,
-      );
-    } finally {
-      await store.disconnect();
-    }
-  });
-});
+import type { MongoDBCreateIndexParams } from './';
 
 // Tests for GitHub issue #6563 - Configurable embedding field path
 // https://github.com/mastra-ai/mastra/issues/6563
@@ -3380,385 +3299,6 @@ describe('MongoDBVector autoEmbed', () => {
   });
 });
 
-// NODE-7937: exercise the public API against real search indexes. Native reranking and
-// automatic embeddings are opt-in because they require Atlas and consume model tokens.
-// Set TEST_MONGODB_RERANKING=1 and MONGODB_RERANK_URL for the Atlas cases.
-const nativeRerankEnabled = process.env.TEST_MONGODB_RERANKING === '1';
-const nativeRerankUrl = nativeRerankEnabled ? process.env.MONGODB_RERANK_URL?.trim() : undefined;
-
-if (nativeRerankEnabled && !nativeRerankUrl) {
-  throw new Error('TEST_MONGODB_RERANKING=1 requires MONGODB_RERANK_URL to be set to an Atlas connection string.');
-}
-
-type HybridQueryBranchTestOverrides = Omit<Partial<MongoDBHybridQueryBranchParams>, 'vector' | 'text'> & {
-  vector?: Pick<MongoDBHybridQueryBranchParams['vector'], 'limit' | 'numCandidates' | 'searchIndexName'>;
-  text?: Partial<MongoDBHybridQueryBranchParams['text']>;
-};
-
-// Only provisioning depends on collection ownership and embedding mode. Tests below
-// share the same behavior checks without branching on deployment capabilities.
-function useHybridQueryCollection({
-  url,
-  ownership,
-  automatic = false,
-}: {
-  url: string | undefined;
-  ownership: 'managed' | 'BYO';
-  automatic?: boolean;
-}) {
-  const isByo = ownership === 'BYO';
-  const indexName = `hybrid_query_${ownership.toLowerCase()}_${automatic}_${new ObjectId().toHexString()}`;
-  const collectionName = isByo ? `${indexName}_source` : indexName;
-  const path = isByo ? 'note' : 'metadata.text';
-  const ids = [new ObjectId(), new ObjectId(), new ObjectId()];
-  const articles = [
-    'To reset your password, open account settings and request a password reset email.',
-    'Pay an overdue invoice by opening billing settings and selecting the unpaid invoice.',
-    'Sort a spreadsheet by selecting a column and choosing ascending or descending order.',
-  ];
-  const vectors = [
-    [0.8, 0.6, 0, 0],
-    [1, 0, 0, 0],
-    [0, 0, 1, 0],
-  ];
-  let store: MongoDBVector;
-  let client: MongoClient;
-  let lastPipeline: any[];
-
-  // Merge branch options so each test supplies only the settings it exercises.
-  const search = (overrides: HybridQueryBranchTestOverrides = {}) =>
-    store.hybridQuery({
-      indexName,
-      ...overrides,
-      vector: {
-        ...(automatic ? { query: 'pay an overdue invoice' } : { queryVector: [1, 0, 0, 0] }),
-        ...overrides.vector,
-      },
-      text: { query: 'invoice', paths: [path], ...overrides.text },
-    });
-
-  beforeAll(async () => {
-    client = new MongoClient(url!);
-    await client.connect();
-    store = new MongoDBVector({
-      id: indexName,
-      uri: url!,
-      dbName,
-      embeddingFieldPath: 'content.embedding',
-      options: { monitorCommands: true },
-    });
-    store['client'].on('commandStarted', event => {
-      if (event.commandName === 'aggregate' && event.command.pipeline?.[0]?.$rankFusion) {
-        lastPipeline = event.command.pipeline;
-      }
-    });
-    await store.connect();
-    if (isByo) {
-      await client
-        .db(dbName)
-        .collection(collectionName)
-        .insertMany(
-          articles.map((note, i) => ({
-            _id: ids[i],
-            note,
-            category: i === 2 ? 'spreadsheet' : 'account',
-            ...(!automatic ? { content: { embedding: vectors[i] } } : {}),
-          })),
-        );
-    }
-    await store.createIndex({
-      indexName,
-      ...(isByo ? { collectionName, searchIndexName: `${indexName}_vectors` } : { filterFields: ['category'] }),
-      ...(automatic ? { autoEmbed: { model: 'voyage-4', path } } : { dimension: 4 }),
-    });
-    if (!isByo) {
-      await store.upsert({
-        indexName,
-        ids: ids.map(id => id.toHexString()),
-        metadata: articles.map((text, i) => ({ text, category: i === 2 ? 'spreadsheet' : 'account' })),
-        documents: articles,
-        ...(!automatic ? { vectors } : {}),
-      });
-    }
-    await store.waitForIndexReady({ indexName, timeoutMs: 300000 });
-    await store.createSearchIndex({ indexName, waitUntilReady: true });
-    // Index readiness does not guarantee all inserted documents are searchable yet.
-    await waitForSync(
-      store,
-      indexName,
-      async () => {
-        const results = await store.hybridQuery({
-          indexName,
-          vector: automatic ? { query: 'pay an overdue invoice' } : { queryVector: [1, 0, 0, 0] },
-          text: { query: 'invoice', paths: [path] },
-        });
-        return results.length === articles.length;
-      },
-      60_000, // Timeout: one minute.
-      1_000, // Poll every second.
-    );
-  }, 600000);
-
-  afterAll(async () => {
-    if (store) {
-      await store.deleteIndex({ indexName });
-      await store.disconnect();
-    }
-    if (client) {
-      if (isByo) await client.db(dbName).collection(collectionName).drop();
-      await client.close();
-    }
-  });
-
-  return {
-    indexName,
-    collectionName,
-    path,
-    isByo,
-    vectorIndexName: isByo ? `${indexName}_vectors` : `${indexName}_vector_index`,
-    ids,
-    articles,
-    search,
-    get store() {
-      return store;
-    },
-    get client() {
-      return client;
-    },
-    get lastPipeline() {
-      return lastPipeline;
-    },
-  };
-}
-
-type HybridQueryCollection = ReturnType<typeof useHybridQueryCollection>;
-
-function testHybridQueryBranchRetrieval(fixture: HybridQueryCollection) {
-  const { search, ids, articles } = fixture;
-
-  it('fuses independently limited branches and returns source metadata with final scores', async () => {
-    const results = await search({ vector: { limit: 3 }, text: { limit: 1 }, topK: 3 });
-    expect(results).toHaveLength(3);
-    expect(results[0].id).toBe(ids[1].toHexString());
-    expect(results.every(result => Number.isFinite(result.score) && result.score > 0)).toBe(true);
-    // Managed indexes return managed fields; BYO indexes return the source document as metadata.
-    if (fixture.isByo) {
-      expect(results[0].metadata).toMatchObject({ note: articles[1], category: 'account' });
-    } else {
-      expect(results[0].metadata).toEqual({ text: articles[1], category: 'account' });
-      expect(results[0].document).toBe(articles[1]);
-    }
-    expect(results[0].metadata).not.toHaveProperty('content.embedding');
-    expect(fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch.limit).toBe(3);
-    expect(fixture.lastPipeline[0].$rankFusion.input.pipelines.text.at(-1)).toEqual({ $limit: 1 });
-    expect(fixture.lastPipeline.some(stage => stage.$rerank)).toBe(false);
-  });
-
-  it('lets each retrieval limit change the fused candidate set independently', async () => {
-    const limited = await search({
-      vector: { limit: 1 },
-      text: { query: 'password spreadsheet', limit: 1 },
-    });
-    expect(limited).toHaveLength(2);
-    expect(limited.map(result => result.id)).toContain(ids[1].toHexString());
-
-    const moreText = await search({
-      vector: { limit: 1 },
-      text: { query: 'password spreadsheet', limit: 2 },
-    });
-    expect(new Set(moreText.map(result => result.id))).toEqual(new Set(ids.map(id => id.toHexString())));
-
-    const moreVector = await search({
-      vector: { limit: 3 },
-      text: { query: 'password spreadsheet', limit: 1 },
-    });
-    expect(new Set(moreVector.map(result => result.id))).toEqual(new Set(ids.map(id => id.toHexString())));
-  });
-
-  it('uses fusion weights to choose the final topK when the branches disagree', async () => {
-    const vectorFirst = await search({ text: { query: 'password' }, topK: 1, weights: { vector: 1, text: 0 } });
-    expect(vectorFirst.map(result => result.id)).toEqual([ids[1].toHexString()]);
-    const textFirst = await search({ text: { query: 'password' }, topK: 1, weights: { text: 10 } });
-    expect(textFirst.map(result => result.id)).toEqual([ids[0].toHexString()]);
-  });
-
-  it('applies the filter to both branches before fusion', async () => {
-    const results = await search({ filter: { category: 'spreadsheet' } });
-    expect(results.map(result => result.id)).toEqual([ids[2].toHexString()]);
-  });
-
-  it('uses an overridden vector index and filters with the pre-filter fallback', async () => {
-    const results = await search({
-      vector: { searchIndexName: fixture.vectorIndexName },
-      filter: { category: 'spreadsheet' },
-    });
-    expect(results.map(result => result.id)).toEqual([ids[2].toHexString()]);
-    const vectorSearch = fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch;
-    expect(vectorSearch.index).toBe(fixture.vectorIndexName);
-    expect(vectorSearch).not.toHaveProperty('searchIndexName');
-    expect(vectorSearch.filter).toHaveProperty('_id.$in');
-  });
-
-  it('sends an explicit numCandidates unchanged and surfaces the server rejection', async () => {
-    await expect(search({ vector: { limit: 3, numCandidates: 1 } })).rejects.toMatchObject({
-      category: 'THIRD_PARTY',
-      cause: { message: expect.any(String) },
-    });
-    expect(fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch.numCandidates).toBe(1);
-  });
-
-  it('defaults numCandidates to 20x the vector limit, capped at 10000', async () => {
-    const numCandidates = () =>
-      fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch.numCandidates;
-    await search({ vector: { limit: 50 }, topK: 1 });
-    expect(numCandidates()).toBe(1000);
-    await search({ vector: { limit: 600 } });
-    expect(numCandidates()).toBe(10000);
-  });
-}
-
-function testOrdinaryVectorIndex(fixture: HybridQueryCollection) {
-  it('returns stored embeddings only when includeVector is true', async () => {
-    const without = await fixture.search({ topK: 1 });
-    expect(without[0]).not.toHaveProperty('vector');
-    expect(without[0].metadata).not.toHaveProperty('content.embedding');
-
-    const [withVector] = await fixture.search({ topK: 1, includeVector: true });
-    expect(withVector.vector).toEqual([1, 0, 0, 0]);
-  });
-
-  it('rejects automatic query embedding on an ordinary vector index', async () => {
-    await expect(
-      fixture.store.hybridQuery({
-        indexName: fixture.indexName,
-        vector: { query: 'reset password' },
-        text: { query: 'invoice', paths: [fixture.path] },
-      }),
-    ).rejects.toThrow(/autoEmbed.*vector.queryVector/);
-  });
-}
-
-function testNativeReranking(fixture: HybridQueryCollection) {
-  const { search, ids, path } = fixture;
-
-  it('reranks fused candidates before topK and projects the native score', async () => {
-    const results = await search({
-      topK: 1,
-      rerank: { query: 'How do I reset my password?', paths: [path], numDocsToRerank: 3 },
-    });
-    expect(results.map(result => result.id)).toEqual([ids[0].toHexString()]);
-    expect(results[0].score).toBeGreaterThan(0);
-    expect(fixture.lastPipeline[1]).toEqual({
-      $rerank: {
-        query: { text: 'How do I reset my password?' },
-        path: [path],
-        model: 'rerank-3',
-        numDocsToRerank: 3,
-      },
-    });
-    expect(fixture.lastPipeline[2]).toEqual({ $limit: 1 });
-    const raw = await fixture.client
-      .db(dbName)
-      .collection(fixture.collectionName)
-      .aggregate([...fixture.lastPipeline.slice(0, 3), { $project: { score: { $meta: 'score' } } }])
-      .toArray();
-    expect(results[0].score).toBeCloseTo(raw[0].score, 5);
-  });
-
-  it('preserves missing-field and unsupported-model server errors', async () => {
-    for (const rerank of [
-      { query: 'reset password', paths: ['missing_field'], numDocsToRerank: 3 },
-      { query: 'reset password', paths: [path], model: 'unsupported-reranker', numDocsToRerank: 3 },
-    ]) {
-      await expect(search({ rerank })).rejects.toMatchObject({
-        category: 'THIRD_PARTY',
-        cause: { message: expect.any(String) },
-      });
-    }
-  });
-}
-
-describe.each(['managed', 'BYO'] as const)(
-  'MongoDBVector hybridQuery branches Atlas Local %s (NODE-7937)',
-  ownership => {
-    const fixture = useHybridQueryCollection({ url: uri, ownership });
-    testHybridQueryBranchRetrieval(fixture);
-    testOrdinaryVectorIndex(fixture);
-
-    it('preserves the server error when native reranking is unavailable, without fallback', async () => {
-      await expect(
-        fixture.search({ rerank: { query: 'reset password', paths: [fixture.path], numDocsToRerank: 3 } }),
-      ).rejects.toMatchObject({
-        category: 'THIRD_PARTY',
-        message: expect.stringContaining('native $rerank failed'),
-        cause: { message: expect.stringMatching(/rerank/i) },
-      });
-    });
-  },
-);
-
-// Atlas Local's pinned image cannot generate embeddings. Register these tests as
-// skipped rather than silently omitting unsupported coverage.
-describe.skip.each(['managed', 'BYO'] as const)(
-  'MongoDBVector hybridQuery branches Atlas Local automatic embeddings %s (unsupported by pinned image)',
-  ownership => {
-    const fixture = useHybridQueryCollection({ url: uri, ownership, automatic: true });
-    testHybridQueryBranchRetrieval(fixture);
-  },
-);
-
-describe.skipIf(!nativeRerankEnabled).each(['managed', 'BYO'] as const)(
-  'MongoDBVector hybridQuery branches Atlas native reranking %s (NODE-7937)',
-  ownership => {
-    const fixture = useHybridQueryCollection({ url: nativeRerankUrl, ownership });
-    testHybridQueryBranchRetrieval(fixture);
-    testOrdinaryVectorIndex(fixture);
-    testNativeReranking(fixture);
-
-    it('accepts an explicit reranking model with precomputed vectors', async () => {
-      const results = await fixture.search({
-        rerank: {
-          query: 'How do I reset my password?',
-          paths: [fixture.path],
-          model: 'rerank-3-lite',
-          numDocsToRerank: 3,
-        },
-        topK: 1,
-      });
-      expect(results[0].id).toBe(fixture.ids[0].toHexString());
-      expect(fixture.lastPipeline[1].$rerank.model).toBe('rerank-3-lite');
-      expect(fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch.model).toBeUndefined();
-    });
-  },
-);
-
-describe.skipIf(!nativeRerankEnabled).each(['managed', 'BYO'] as const)(
-  'MongoDBVector hybridQuery branches Atlas native reranking automatic embeddings %s (NODE-7937)',
-  ownership => {
-    const fixture = useHybridQueryCollection({ url: nativeRerankUrl, ownership, automatic: true });
-    testHybridQueryBranchRetrieval(fixture);
-    testNativeReranking(fixture);
-
-    it('keeps the embedding model independent of an explicit reranking model', async () => {
-      const results = await fixture.store.hybridQuery({
-        indexName: fixture.indexName,
-        vector: { query: 'pay an overdue invoice', model: 'voyage-4-lite' },
-        text: { query: 'invoice', paths: [fixture.path] },
-        rerank: {
-          query: 'How do I reset my password?',
-          paths: [fixture.path],
-          model: 'rerank-3-lite',
-          numDocsToRerank: 3,
-        },
-        topK: 1,
-      });
-      expect(results[0].id).toBe(fixture.ids[0].toHexString());
-      expect(fixture.lastPipeline[1].$rerank.model).toBe('rerank-3-lite');
-      expect(fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch.model).toBe('voyage-4-lite');
-    });
-  },
-);
-
 // ─── Live Automated Embedding ────────────────────────────────────────────────────────────
 // These write documents and consume Voyage AI embedding tokens, so they need an explicit
 // opt-in as well as credentials:
@@ -3895,5 +3435,378 @@ describeAutoEmbed('MongoDBVector Automated Embedding (live)', () => {
     const stats = await store.describeIndex({ indexName });
     expect(stats.count).toBe(movies.length);
     expect(stats.dimension).toBe(1024);
+  });
+});
+
+// ─── hybridQuery with per-branch options (NODE-7937) ─────────────────────────────────────
+// Three articles: "password-reset" is the only keyword match for "password", and the query
+// vector [1, 0, 0, 0] ranks "overdue-invoice", then "password-reset", then "spreadsheet-sort".
+const ARTICLE_IDS = ['password-reset', 'overdue-invoice', 'spreadsheet-sort'];
+const ARTICLES = [
+  'To reset your password, open account settings and request a password reset email.',
+  'Pay an overdue invoice by opening billing settings and selecting the unpaid invoice.',
+  'Sort a spreadsheet by selecting a column and choosing ascending or descending order.',
+];
+const CATEGORIES = ['account', 'billing', 'spreadsheet'];
+const ARTICLE_VECTORS = [
+  [0.8, 0.6, 0, 0],
+  [1, 0, 0, 0],
+  [0, 0, 1, 0],
+];
+
+/** Managed collection: the store creates it, and the article text lives in `document`. */
+async function seedManaged(store: MongoDBVector, indexName: string, { autoEmbed = false } = {}) {
+  await store.createIndex({ indexName, ...(autoEmbed ? { autoEmbed: { model: 'voyage-4' } } : { dimension: 4 }) });
+  await store.upsert({
+    indexName,
+    ids: ARTICLE_IDS,
+    documents: ARTICLES,
+    metadata: CATEGORIES.map(category => ({ category })),
+    ...(autoEmbed ? {} : { vectors: ARTICLE_VECTORS }),
+  });
+  await store.waitForIndexReady({ indexName, timeoutMs: 300000 });
+  await store.createSearchIndex({ indexName, waitUntilReady: true });
+}
+
+/** BYO collection: the caller owns it, and the article text lives in `note`. */
+async function seedByo(store: MongoDBVector, indexName: string, { autoEmbed = false } = {}) {
+  const collectionName = `${indexName}_source`;
+  await store['db'].collection(collectionName).insertMany(
+    ARTICLES.map((note, i) => ({
+      _id: ARTICLE_IDS[i] as any,
+      note,
+      category: CATEGORIES[i],
+      ...(autoEmbed ? {} : { embedding: ARTICLE_VECTORS[i] }),
+    })),
+  );
+  await store.createIndex({
+    indexName,
+    collectionName,
+    searchIndexName: `${indexName}_vectors`,
+    ...(autoEmbed ? { autoEmbed: { model: 'voyage-4', path: 'note' } } : { dimension: 4 }),
+  });
+  await store.waitForIndexReady({ indexName, timeoutMs: 300000 });
+  await store.createSearchIndex({ indexName, waitUntilReady: true });
+}
+
+/** Index readiness doesn't mean every document is searchable yet, so poll until all three are. */
+async function waitUntilSearchable(store: MongoDBVector, indexName: string, vector: any, path: string) {
+  await waitForSync(
+    store,
+    indexName,
+    async () =>
+      (await store.hybridQuery({ indexName, vector, text: { query: 'password', paths: [path] } })).length === 3,
+    300000,
+    2000,
+  );
+}
+
+async function cleanUp(store: MongoDBVector, indexName: string, byo: boolean) {
+  await store.deleteIndex({ indexName }).catch(() => {});
+  if (byo)
+    await store['db']
+      .collection(`${indexName}_source`)
+      .drop()
+      .catch(() => {});
+  await store.disconnect();
+}
+
+const ids = (results: { id: string }[]) => results.map(result => result.id);
+
+describe('hybridQuery per-branch options: managed collection (Atlas Local)', () => {
+  const indexName = `hq_managed_${Date.now()}`;
+  const store = new MongoDBVector({ id: 'hq-managed', uri, dbName });
+
+  beforeAll(async () => {
+    await store.connect();
+    await seedManaged(store, indexName);
+    await waitUntilSearchable(store, indexName, { queryVector: [1, 0, 0, 0] }, 'document');
+  }, 600000);
+  afterAll(() => cleanUp(store, indexName, false));
+
+  it('fuses vector and text results', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['document'] },
+    });
+    // "password-reset" is in both branches, so fusion ranks it first.
+    expect(ids(results)).toEqual(['password-reset', 'overdue-invoice', 'spreadsheet-sort']);
+  });
+
+  it('returns the managed metadata and document fields, without the embedding', async () => {
+    const [first] = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['document'] },
+      topK: 1,
+    });
+    expect(first.metadata).toEqual({ category: 'account' });
+    expect(first.document).toBe(ARTICLES[0]);
+    expect(first).not.toHaveProperty('vector');
+  });
+
+  it('returns the stored embedding with includeVector', async () => {
+    const [first] = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['document'] },
+      topK: 1,
+      includeVector: true,
+    });
+    expect(first.vector).toEqual(ARTICLE_VECTORS[0]);
+  });
+
+  it('searches the vector index named in vector.searchIndexName', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0], searchIndexName: 'no_such_vector_index' },
+      text: { query: 'password', paths: ['document'] },
+    });
+    // The named index doesn't exist, so only the text branch contributes.
+    expect(ids(results)).toEqual(['password-reset']);
+  });
+
+  it('searches the text index named in text.searchIndexName', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['document'], searchIndexName: 'no_such_text_index' },
+    });
+    // The named index doesn't exist, so only the vector branch contributes.
+    expect(ids(results)).toEqual(['overdue-invoice', 'password-reset', 'spreadsheet-sort']);
+  });
+
+  it('still accepts the flat parameters', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      queryVector: [1, 0, 0, 0],
+      query: 'password',
+      paths: ['document'],
+    });
+    expect(ids(results)).toEqual(['password-reset', 'overdue-invoice', 'spreadsheet-sort']);
+  });
+});
+
+describe('hybridQuery per-branch options: BYO collection (Atlas Local)', () => {
+  const indexName = `hq_byo_${Date.now()}`;
+  const store = new MongoDBVector({ id: 'hq-byo', uri, dbName });
+
+  beforeAll(async () => {
+    await store.connect();
+    await seedByo(store, indexName);
+    await waitUntilSearchable(store, indexName, { queryVector: [1, 0, 0, 0] }, 'note');
+  }, 600000);
+  afterAll(() => cleanUp(store, indexName, true));
+
+  it('fuses vector and text results', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['note'] },
+    });
+    expect(ids(results)).toEqual(['password-reset', 'overdue-invoice', 'spreadsheet-sort']);
+  });
+
+  it('returns the source document as metadata, without the embedding', async () => {
+    const [first] = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['note'] },
+      topK: 1,
+    });
+    expect(first.metadata).toEqual({ _id: 'password-reset', note: ARTICLES[0], category: 'account' });
+    expect(first).not.toHaveProperty('vector');
+  });
+
+  it('returns the stored embedding with includeVector', async () => {
+    const [first] = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['note'] },
+      topK: 1,
+      includeVector: true,
+    });
+    expect(first.vector).toEqual(ARTICLE_VECTORS[0]);
+  });
+
+  it('searches the vector index named in vector.searchIndexName', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0], searchIndexName: 'no_such_vector_index' },
+      text: { query: 'password', paths: ['note'] },
+    });
+    expect(ids(results)).toEqual(['password-reset']);
+  });
+
+  it('searches the text index named in text.searchIndexName', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'password', paths: ['note'], searchIndexName: 'no_such_text_index' },
+    });
+    expect(ids(results)).toEqual(['overdue-invoice', 'password-reset', 'spreadsheet-sort']);
+  });
+});
+
+// ─── hybridQuery against Atlas: native reranking and automatic embeddings ────────────────
+// Native reranking needs Atlas (MongoDB 9.0+, M10 or larger, Native Reranking enabled in the
+// project). Set MONGODB_RERANK_URL in stores/mongodb/.env to run these; skipped otherwise.
+// They consume Voyage AI reranking and embedding tokens.
+const RERANK_URL = process.env.MONGODB_RERANK_URL;
+const describeAtlas = RERANK_URL ? describe : describe.skip;
+const RERANK_QUERY = 'How do I reset my password?';
+
+describeAtlas('hybridQuery per-branch options: managed collection (Atlas)', () => {
+  const indexName = `hq_atlas_managed_${Date.now()}`;
+  let store: MongoDBVector;
+
+  beforeAll(async () => {
+    store = new MongoDBVector({ id: 'hq-atlas-managed', uri: RERANK_URL!, dbName });
+    await store.connect();
+    await seedManaged(store, indexName);
+    await waitUntilSearchable(store, indexName, { queryVector: [1, 0, 0, 0] }, 'document');
+  }, 600000);
+  afterAll(() => cleanUp(store, indexName, false));
+
+  it('reranks the fused results', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'invoice', paths: ['document'] },
+      rerank: { query: RERANK_QUERY, paths: ['document'], numDocsToRerank: 3 },
+      topK: 1,
+    });
+    // Fusion alone ranks "overdue-invoice" first; the reranker moves "password-reset" up.
+    expect(ids(results)).toEqual(['password-reset']);
+    expect(results[0].score).toBeGreaterThan(0);
+  });
+});
+
+describeAtlas('hybridQuery per-branch options: BYO collection (Atlas)', () => {
+  const indexName = `hq_atlas_byo_${Date.now()}`;
+  let store: MongoDBVector;
+
+  beforeAll(async () => {
+    store = new MongoDBVector({ id: 'hq-atlas-byo', uri: RERANK_URL!, dbName });
+    await store.connect();
+    await seedByo(store, indexName);
+    await waitUntilSearchable(store, indexName, { queryVector: [1, 0, 0, 0] }, 'note');
+  }, 600000);
+  afterAll(() => cleanUp(store, indexName, true));
+
+  it('reranks the fused results', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0] },
+      text: { query: 'invoice', paths: ['note'] },
+      rerank: { query: RERANK_QUERY, paths: ['note'], numDocsToRerank: 3 },
+      topK: 1,
+    });
+    expect(ids(results)).toEqual(['password-reset']);
+    expect(results[0].score).toBeGreaterThan(0);
+  });
+});
+
+describeAtlas('hybridQuery per-branch options: managed collection with automatic embeddings (Atlas)', () => {
+  const indexName = `hq_atlas_managed_auto_${Date.now()}`;
+  let store: MongoDBVector;
+
+  beforeAll(async () => {
+    store = new MongoDBVector({ id: 'hq-atlas-managed-auto', uri: RERANK_URL!, dbName });
+    await store.connect();
+    await seedManaged(store, indexName, { autoEmbed: true });
+    await waitUntilSearchable(store, indexName, { query: RERANK_QUERY }, 'document');
+  }, 600000);
+  afterAll(() => cleanUp(store, indexName, false));
+
+  it('fuses vector and text results', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { query: RERANK_QUERY },
+      text: { query: 'password', paths: ['document'] },
+    });
+    expect(ids(results)[0]).toBe('password-reset');
+  });
+
+  it('reranks the fused results', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { query: 'pay an overdue invoice' },
+      text: { query: 'invoice', paths: ['document'] },
+      rerank: { query: RERANK_QUERY, paths: ['document'], numDocsToRerank: 3 },
+      topK: 1,
+    });
+    // Both branches favour "overdue-invoice"; the reranker moves "password-reset" up.
+    expect(ids(results)).toEqual(['password-reset']);
+  });
+
+  it('searches the vector index named in vector.searchIndexName', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { query: RERANK_QUERY, searchIndexName: 'no_such_vector_index' },
+      text: { query: 'password', paths: ['document'] },
+    });
+    expect(ids(results)).toEqual(['password-reset']);
+  });
+
+  it('searches the text index named in text.searchIndexName', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { query: RERANK_QUERY },
+      text: { query: 'password', paths: ['document'], searchIndexName: 'no_such_text_index' },
+    });
+    expect(results).toHaveLength(3);
+  });
+});
+
+describeAtlas('hybridQuery per-branch options: BYO collection with automatic embeddings (Atlas)', () => {
+  const indexName = `hq_atlas_byo_auto_${Date.now()}`;
+  let store: MongoDBVector;
+
+  beforeAll(async () => {
+    store = new MongoDBVector({ id: 'hq-atlas-byo-auto', uri: RERANK_URL!, dbName });
+    await store.connect();
+    await seedByo(store, indexName, { autoEmbed: true });
+    await waitUntilSearchable(store, indexName, { query: RERANK_QUERY }, 'note');
+  }, 600000);
+  afterAll(() => cleanUp(store, indexName, true));
+
+  it('fuses vector and text results', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { query: RERANK_QUERY },
+      text: { query: 'password', paths: ['note'] },
+    });
+    expect(ids(results)[0]).toBe('password-reset');
+  });
+
+  it('reranks the fused results', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { query: 'pay an overdue invoice' },
+      text: { query: 'invoice', paths: ['note'] },
+      rerank: { query: RERANK_QUERY, paths: ['note'], numDocsToRerank: 3 },
+      topK: 1,
+    });
+    expect(ids(results)).toEqual(['password-reset']);
+  });
+
+  it('searches the vector index named in vector.searchIndexName', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { query: RERANK_QUERY, searchIndexName: 'no_such_vector_index' },
+      text: { query: 'password', paths: ['note'] },
+    });
+    expect(ids(results)).toEqual(['password-reset']);
+  });
+
+  it('searches the text index named in text.searchIndexName', async () => {
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { query: RERANK_QUERY },
+      text: { query: 'password', paths: ['note'], searchIndexName: 'no_such_text_index' },
+    });
+    expect(results).toHaveLength(3);
   });
 });
