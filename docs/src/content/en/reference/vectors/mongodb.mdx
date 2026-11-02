@@ -575,7 +575,9 @@ const results = await store.hybridQuery({
 })
 ```
 
-Each retrieval branch contributes up to its own `limit` documents. `$rerank` evaluates up to `numDocsToRerank` fused documents, then `topK` limits the response. The reranker receives source documents before projection, so `rerank.paths` refers to fields in the original collection, including for bring-your-own collections.
+Each retrieval branch contributes up to its own `limit` documents. `$rerank` evaluates up to `numDocsToRerank` fused documents, then `topK` limits the response. The reranker receives source documents before projection, so `text.paths` and `rerank.paths` are relative to the document root, for both managed and bring-your-own collections.
+
+This form has no `metadataMode` option. Managed indexes return the managed `metadata` and `document` fields. Bring-your-own indexes return the source document as `metadata`, excluding the embedding field.
 
 On an `autoEmbed` index, use `vector.query` instead of `vector.queryVector`. Omit `rerank` to return fused results without reranking:
 
@@ -607,7 +609,7 @@ const results = await store.hybridQuery({
     type: 'MongoDBVectorFilter',
     isOptional: true,
     description:
-      'Filter applied to both retrieval branches before fusion. Targets metadata fields in field mode and source fields in document mode. Uses the same vector filter pushdown or candidate-ID fallback as the flat form.',
+      'Filter applied to both retrieval branches before fusion. On managed indexes, keys target the managed metadata fields. On bring-your-own indexes, keys target source document fields. Uses the same vector filter pushdown or candidate-ID fallback as the flat form.',
   },
   {
     name: 'weights',
@@ -615,14 +617,6 @@ const results = await store.hybridQuery({
     isOptional: true,
     description:
       'Finite, non-negative fusion weights. Each omitted weight defaults to 1. At least one must be positive.',
-  },
-  {
-    name: 'metadataMode',
-    type: "'field' | 'document'",
-    isOptional: true,
-    defaultValue: 'field',
-    description:
-      'field returns managed metadata and document fields. document returns the source document as metadata, excluding the configured embedding field.',
   },
   {
     name: 'vector',

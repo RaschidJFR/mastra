@@ -90,18 +90,25 @@ export interface MongoDBHybridQueryParams {
   textSearchIndexName?: string;
 }
 
-/** Per-branch retrieval and optional native reranking options for {@link MongoDBVector.hybridQuery}. */
+/**
+ * Per-branch retrieval and optional native reranking options for {@link MongoDBVector.hybridQuery}.
+ *
+ * The result shape follows the collection: managed indexes return the managed `metadata` and
+ * `document` fields; bring-your-own (BYO) indexes return the source document as `metadata`,
+ * without its embedding.
+ */
 export interface MongoDBHybridQueryBranchParams {
   /** Logical Mastra index, resolving the collection and its registered search indexes. */
   indexName: string;
   /** Final result limit, applied after fusion and optional reranking. Integer from 1 to 10000; defaults to 10. */
   topK?: number;
-  /** Metadata filter applied to both retrieval branches before fusion. */
+  /**
+   * Filter applied to both retrieval branches before fusion. On managed indexes, bare keys
+   * target the managed `metadata` fields; on BYO indexes, they target source document fields.
+   */
   filter?: MongoDBVectorFilter;
   /** Non-negative, finite fusion weights. Each omitted weight defaults to 1; at least one must be positive. */
   weights?: { vector?: number; text?: number };
-  /** Return managed fields (default) or the source document as metadata, excluding its embedding. */
-  metadataMode?: 'field' | 'document';
   /** Vector retrieval using either a caller-generated embedding or text for an autoEmbed index. */
   vector: (
     | {
@@ -129,7 +136,7 @@ export interface MongoDBHybridQueryBranchParams {
   text: {
     /** Non-empty full-text query. */
     query: string;
-    /** Non-empty array of indexed source field paths to search. */
+    /** Non-empty array of indexed field paths to search, relative to the document root (e.g. `metadata.text`). */
     paths: string[];
     /** Override the registered physical full-text search index for this call. */
     searchIndexName?: string;
@@ -140,7 +147,7 @@ export interface MongoDBHybridQueryBranchParams {
   rerank?: {
     /** Non-empty query used to judge relevance, independent of both retrieval queries. */
     query: string;
-    /** Non-empty array of source field paths. Missing document fields cause a server error. */
+    /** Non-empty array of field paths, relative to the document root. Missing document fields cause a server error. */
     paths: string[];
     /** Native reranking model. Defaults to 'rerank-3'; never changes the embedding model. */
     model?: string;
@@ -1393,7 +1400,7 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
 
   private async hybridQueryBranches(params: MongoDBHybridQueryBranchParams): Promise<QueryResult[]> {
     this.validateHybridQueryBranchParams(params);
-    const { indexName, vector, text, rerank, topK = 10, filter, weights, metadataMode = 'field' } = params;
+    const { indexName, vector, text, rerank, topK = 10, filter, weights } = params;
     const defaultLimit = Math.min(10000, Math.max(topK * 4, 20));
     const vectorLimit = vector.limit ?? defaultLimit;
     const textLimit = text.limit ?? defaultLimit;
@@ -1408,7 +1415,7 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
 
     try {
       await this.assertRankFusionSupported();
-      const { collectionName, searchIndexName, autoEmbed } = await this.resolveIndexTarget(indexName);
+      const { collectionName, searchIndexName, autoEmbed, isByo } = await this.resolveIndexTarget(indexName);
       if (vector.query !== undefined && !autoEmbed) {
         throw new MastraError({
           id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'NOT_AUTO_EMBED'),
@@ -1424,7 +1431,7 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
         collectionName,
         searchIndexName,
         autoEmbed,
-        metadataMode,
+        metadataMode: isByo ? 'document' : 'field',
         filter,
         weights,
         topK,
@@ -1602,9 +1609,6 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     if (vector.limit !== undefined) integer(vector.limit, 'vector.limit');
     if (text.limit !== undefined) integer(text.limit, 'text.limit');
     if (vector.numCandidates !== undefined) integer(vector.numCandidates, 'vector.numCandidates');
-    if (params.metadataMode !== undefined && !['field', 'document'].includes(params.metadataMode)) {
-      fail('metadataMode must be field or document.');
-    }
     if (weights !== undefined) {
       if (!weights || typeof weights !== 'object') fail('weights must be an object.');
       const values = [weights.vector ?? 1, weights.text ?? 1];

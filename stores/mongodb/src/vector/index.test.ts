@@ -36,7 +36,6 @@ describe('MongoDBVector hybridQuery branch input validation (NODE-7937)', () => 
     ['fractional text limit', { text: { ...request.text, limit: 1.5 } }, /text.limit/],
     ['invalid candidates', { vector: { ...request.vector, numCandidates: 0 } }, /vector.numCandidates/],
     ['excessive candidates', { vector: { ...request.vector, numCandidates: 10001 } }, /vector.numCandidates/],
-    ['unknown metadata mode', { metadataMode: 'other' }, /metadataMode/],
     ['negative fusion weight', { weights: { vector: -1 } }, /weights/],
     ['non-finite fusion weight', { weights: { text: NaN } }, /weights/],
     ['zero fusion weights', { weights: { vector: 0, text: 0 } }, /positive/],
@@ -3409,7 +3408,6 @@ function useHybridQueryCollection({
   const indexName = `hybrid_query_${ownership.toLowerCase()}_${automatic}_${new ObjectId().toHexString()}`;
   const collectionName = isByo ? `${indexName}_source` : indexName;
   const path = isByo ? 'note' : 'metadata.text';
-  const metadataMode = isByo ? 'document' : 'field';
   const ids = [new ObjectId(), new ObjectId(), new ObjectId()];
   const articles = [
     'To reset your password, open account settings and request a password reset email.',
@@ -3429,7 +3427,6 @@ function useHybridQueryCollection({
   const search = (overrides: HybridQueryBranchTestOverrides = {}) =>
     store.hybridQuery({
       indexName,
-      metadataMode,
       ...overrides,
       vector: {
         ...(automatic ? { query: 'pay an overdue invoice' } : { queryVector: [1, 0, 0, 0] }),
@@ -3490,7 +3487,6 @@ function useHybridQueryCollection({
       async () => {
         const results = await store.hybridQuery({
           indexName,
-          metadataMode,
           vector: automatic ? { query: 'pay an overdue invoice' } : { queryVector: [1, 0, 0, 0] },
           text: { query: 'invoice', paths: [path] },
         });
@@ -3516,7 +3512,7 @@ function useHybridQueryCollection({
     indexName,
     collectionName,
     path,
-    metadataMode,
+    isByo,
     ids,
     articles,
     search,
@@ -3542,7 +3538,13 @@ function testHybridQueryBranchRetrieval(fixture: HybridQueryCollection) {
     expect(results).toHaveLength(3);
     expect(results[0].id).toBe(ids[1].toHexString());
     expect(results.every(result => Number.isFinite(result.score) && result.score > 0)).toBe(true);
-    expect(fixture.metadataMode === 'document' ? results[0].metadata?.note : results[0].document).toBe(articles[1]);
+    // Managed indexes return managed fields; BYO indexes return the source document as metadata.
+    if (fixture.isByo) {
+      expect(results[0].metadata).toMatchObject({ note: articles[1], category: 'account' });
+    } else {
+      expect(results[0].metadata).toEqual({ text: articles[1], category: 'account' });
+      expect(results[0].document).toBe(articles[1]);
+    }
     expect(results[0].metadata).not.toHaveProperty('content.embedding');
     expect(fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch.limit).toBe(3);
     expect(fixture.lastPipeline[0].$rankFusion.input.pipelines.text.at(-1)).toEqual({ $limit: 1 });
@@ -3711,7 +3713,6 @@ describe.skipIf(!nativeRerankEnabled).each(['managed', 'BYO'] as const)(
     it('keeps the embedding model independent of an explicit reranking model', async () => {
       const results = await fixture.store.hybridQuery({
         indexName: fixture.indexName,
-        metadataMode: fixture.metadataMode,
         vector: { query: 'pay an overdue invoice', model: 'voyage-4-lite' },
         text: { query: 'invoice', paths: [fixture.path] },
         rerank: {
