@@ -27,6 +27,7 @@ describe('MongoDBVector hybridQuery branch input validation (NODE-7937)', () => 
     ['empty keyword paths', { text: { query: 'reset', paths: [] } }, /text.paths/],
     ['blank keyword path', { text: { query: 'reset', paths: [' '] } }, /text.paths/],
     ['blank search index', { text: { ...request.text, searchIndexName: '' } }, /text.searchIndexName/],
+    ['blank vector index', { vector: { ...request.vector, searchIndexName: ' ' } }, /vector.searchIndexName/],
     ['zero final limit', { topK: 0 }, /topK/],
     ['fractional final limit', { topK: 1.5 }, /topK/],
     ['non-finite final limit', { topK: Infinity }, /topK/],
@@ -3390,7 +3391,7 @@ if (nativeRerankEnabled && !nativeRerankUrl) {
 }
 
 type HybridQueryBranchTestOverrides = Omit<Partial<MongoDBHybridQueryBranchParams>, 'vector' | 'text'> & {
-  vector?: Pick<MongoDBHybridQueryBranchParams['vector'], 'limit' | 'numCandidates'>;
+  vector?: Pick<MongoDBHybridQueryBranchParams['vector'], 'limit' | 'numCandidates' | 'searchIndexName'>;
   text?: Partial<MongoDBHybridQueryBranchParams['text']>;
 };
 
@@ -3514,6 +3515,7 @@ function useHybridQueryCollection({
     collectionName,
     path,
     isByo,
+    vectorIndexName: isByo ? `${indexName}_vectors` : `${indexName}_vector_index`,
     ids,
     articles,
     search,
@@ -3583,6 +3585,18 @@ function testHybridQueryBranchRetrieval(fixture: HybridQueryCollection) {
   it('applies the filter to both branches before fusion', async () => {
     const results = await search({ filter: { category: 'spreadsheet' } });
     expect(results.map(result => result.id)).toEqual([ids[2].toHexString()]);
+  });
+
+  it('uses an overridden vector index and filters with the pre-filter fallback', async () => {
+    const results = await search({
+      vector: { searchIndexName: fixture.vectorIndexName },
+      filter: { category: 'spreadsheet' },
+    });
+    expect(results.map(result => result.id)).toEqual([ids[2].toHexString()]);
+    const vectorSearch = fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch;
+    expect(vectorSearch.index).toBe(fixture.vectorIndexName);
+    expect(vectorSearch).not.toHaveProperty('searchIndexName');
+    expect(vectorSearch.filter).toHaveProperty('_id.$in');
   });
 
   it('sends an explicit numCandidates unchanged and surfaces the server rejection', async () => {

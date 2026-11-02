@@ -666,6 +666,13 @@ const results = await store.hybridQuery({
       'Vector search candidates. Integer from 1 to 10000. An explicit value is sent to MongoDB unchanged, which rejects a value below the resolved `vector.limit`.',
   },
   {
+    name: 'vector.searchIndexName',
+    type: 'string',
+    isOptional: true,
+    description:
+      'Override the registered physical vector search index for this call. Filters then always use the candidate-ID fallback, because declared filter fields are read from the registered index.',
+  },
+  {
     name: 'text',
     type: 'object',
     description: 'Full-text retrieval configuration, independent of vector retrieval.',

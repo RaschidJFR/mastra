@@ -138,6 +138,11 @@ export interface MongoDBHybridQueryBranchParams {
     numCandidates?: number;
     /** Vector results contributed to fusion, from 1 to 10000. Defaults to min(10000, max(4 * topK, 20)). */
     limit?: number;
+    /**
+     * Override the registered physical vector search index for this call. Filters then always use
+     * the pre-filter fallback, because declared filter fields are read from the registered index.
+     */
+    searchIndexName?: string;
   };
   /** Full-text (BM25) retrieval, configured independently of vector retrieval. */
   text: {
@@ -1437,17 +1442,19 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
         });
       }
       const textIndex = text.searchIndexName ?? (await this.resolveTextSearchIndexName(indexName));
+      const { searchIndexName: vectorIndexOverride, ...vectorInput } = vector;
       return await this.runHybridPipeline({
         indexName,
         collectionName,
-        searchIndexName,
+        searchIndexName: vectorIndexOverride ?? searchIndexName,
+        pushDownFilter: vectorIndexOverride === undefined,
         autoEmbed,
         includeVector,
         metadataMode: isByo ? 'document' : 'field',
         filter,
         weights,
         topK,
-        vector: { ...vector, numCandidates: candidates, limit: vectorLimit },
+        vector: { ...vectorInput, numCandidates: candidates, limit: vectorLimit },
         text: { query: text.query, paths: text.paths, searchIndexName: textIndex, limit: textLimit },
         rerank,
       });
@@ -1473,6 +1480,7 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     indexName,
     collectionName,
     searchIndexName,
+    pushDownFilter = true,
     autoEmbed,
     includeVector = false,
     metadataMode,
@@ -1486,6 +1494,8 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     indexName: string;
     collectionName: string;
     searchIndexName: string;
+    /** False when the vector index is overridden, since declared filter fields belong to the registered index. */
+    pushDownFilter?: boolean;
     autoEmbed?: IndexTarget['autoEmbed'];
     includeVector?: boolean;
     metadataMode: 'field' | 'document';
@@ -1514,11 +1524,13 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     // matching _ids via $match and filter by _id. This avoids a hard $vectorSearch error
     // on BYO collections whose metadata fields are typically not declared as filter fields.
     if (hasMetadataFilter) {
-      let declaredPaths: Set<string>;
-      try {
-        declaredPaths = await this.getDeclaredFilterPaths(indexName);
-      } catch {
-        declaredPaths = new Set();
+      let declaredPaths = new Set<string>();
+      if (pushDownFilter) {
+        try {
+          declaredPaths = await this.getDeclaredFilterPaths(indexName);
+        } catch {
+          declaredPaths = new Set();
+        }
       }
       if (this.canPushDownFilter(metadataFilter, declaredPaths)) {
         vectorSearch.filter = metadataFilter;
@@ -1619,6 +1631,9 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     paths(text.paths, 'text.paths');
     if (text.searchIndexName !== undefined && !nonEmptyString(text.searchIndexName)) {
       fail('text.searchIndexName must be a non-empty string.');
+    }
+    if (vector.searchIndexName !== undefined && !nonEmptyString(vector.searchIndexName)) {
+      fail('vector.searchIndexName must be a non-empty string.');
     }
     if (params.topK !== undefined) integer(params.topK, 'topK');
     if (vector.limit !== undefined) integer(vector.limit, 'vector.limit');
