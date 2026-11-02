@@ -619,6 +619,14 @@ const results = await store.hybridQuery({
       'Finite, non-negative fusion weights. Each omitted weight defaults to 1. At least one must be positive.',
   },
   {
+    name: 'includeVector',
+    type: 'boolean',
+    isOptional: true,
+    defaultValue: 'false',
+    description:
+      "Return each result's stored embedding as `vector`. Not supported on `autoEmbed` indexes, which throw an error.",
+  },
+  {
     name: 'vector',
     type: 'object',
     description: 'Vector retrieval configuration. Supply exactly one of queryVector or query.',
@@ -655,7 +663,7 @@ const results = await store.hybridQuery({
     isOptional: true,
     defaultValue: 'min(10000, max(vector.limit, 20 * topK))',
     description:
-      'Vector search candidates. Integer from 1 to 10000. Values below the resolved vector.limit are raised to that limit with a warning.',
+      'Vector search candidates. Integer from 1 to 10000. An explicit value is sent to MongoDB unchanged, which rejects a value below the resolved `vector.limit`.',
   },
   {
     name: 'text',

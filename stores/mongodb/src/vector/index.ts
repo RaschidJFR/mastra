@@ -109,6 +109,11 @@ export interface MongoDBHybridQueryBranchParams {
   filter?: MongoDBVectorFilter;
   /** Non-negative, finite fusion weights. Each omitted weight defaults to 1; at least one must be positive. */
   weights?: { vector?: number; text?: number };
+  /**
+   * Return each result's stored embedding as `vector`. Defaults to false. Not supported on
+   * autoEmbed indexes, whose generated embeddings are not stored on the documents.
+   */
+  includeVector?: boolean;
   /** Vector retrieval using either a caller-generated embedding or text for an autoEmbed index. */
   vector: (
     | {
@@ -125,8 +130,9 @@ export interface MongoDBHybridQueryBranchParams {
         model?: string;
       }
   ) & {
-    /** Candidates considered by vector search, from 1 to 10000. Defaults to min(10000, max(limit, 20 * topK)).
-     * Values below the vector limit are raised to that limit with a warning.
+    /**
+     * Candidates considered by vector search, from 1 to 10000. Defaults to min(10000, max(limit, 20 * topK)).
+     * An explicit value is sent to MongoDB unchanged, which rejects one below the vector limit.
      */
     numCandidates?: number;
     /** Vector results contributed to fusion, from 1 to 10000. Defaults to min(10000, max(4 * topK, 20)). */
@@ -1400,18 +1406,13 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
 
   private async hybridQueryBranches(params: MongoDBHybridQueryBranchParams): Promise<QueryResult[]> {
     this.validateHybridQueryBranchParams(params);
-    const { indexName, vector, text, rerank, topK = 10, filter, weights } = params;
+    const { indexName, vector, text, rerank, topK = 10, filter, weights, includeVector = false } = params;
     const defaultLimit = Math.min(10000, Math.max(topK * 4, 20));
     const vectorLimit = vector.limit ?? defaultLimit;
     const textLimit = text.limit ?? defaultLimit;
-    const candidates = Math.max(vectorLimit, vector.numCandidates ?? Math.min(10000, topK * 20));
-    if (vector.numCandidates !== undefined && vector.numCandidates < vectorLimit) {
-      this.logger.warn('hybridQuery: vector.numCandidates is below vector.limit; raising it to vector.limit.', {
-        indexName,
-        numCandidates: vector.numCandidates,
-        limit: vectorLimit,
-      });
-    }
+    // Only the computed default is adjusted. An explicit numCandidates is sent as-is, so MongoDB
+    // reports an invalid value (for example, below the vector limit) instead of it being rewritten.
+    const candidates = vector.numCandidates ?? Math.max(vectorLimit, Math.min(10000, topK * 20));
 
     try {
       await this.assertRankFusionSupported();
@@ -1425,12 +1426,22 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
           details: { indexName },
         });
       }
+      if (includeVector && autoEmbed) {
+        throw new MastraError({
+          id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'INVALID_ARGS'),
+          text: `includeVector is not supported on autoEmbed index "${indexName}": MongoDB keeps the generated embeddings in its own internal database, so they are not on the returned documents.`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.USER,
+          details: { indexName },
+        });
+      }
       const textIndex = text.searchIndexName ?? (await this.resolveTextSearchIndexName(indexName));
       return await this.runHybridPipeline({
         indexName,
         collectionName,
         searchIndexName,
         autoEmbed,
+        includeVector,
         metadataMode: isByo ? 'document' : 'field',
         filter,
         weights,
@@ -1462,6 +1473,7 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     collectionName,
     searchIndexName,
     autoEmbed,
+    includeVector = false,
     metadataMode,
     filter,
     weights,
@@ -1474,6 +1486,7 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     collectionName: string;
     searchIndexName: string;
     autoEmbed?: IndexTarget['autoEmbed'];
+    includeVector?: boolean;
     metadataMode: 'field' | 'document';
     filter?: MongoDBVectorFilter;
     weights?: { vector?: number; text?: number };
@@ -1551,7 +1564,7 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
       // which is the text-branch score and is absent on vector-only hits). Score is projected via
       // $meta inside buildProjection (not a preceding $set) so it never pollutes
       // `metadata: '$$ROOT'` in document mode, and only after reranking so $rerank sees source fields.
-      ...this.buildProjection(metadataMode, false, 'score', autoEmbed?.path),
+      ...this.buildProjection(metadataMode, includeVector, 'score', autoEmbed?.path),
     ];
     const rows = await collection.aggregate(pipeline).toArray();
     return rows.map((row: Document) => ({
@@ -1559,6 +1572,7 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
       score: typeof row.score === 'number' ? row.score : 0,
       metadata: row.metadata,
       document: row.document,
+      ...(includeVector ? { vector: row.vector } : {}),
     }));
   }
 
@@ -1609,6 +1623,9 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     if (vector.limit !== undefined) integer(vector.limit, 'vector.limit');
     if (text.limit !== undefined) integer(text.limit, 'text.limit');
     if (vector.numCandidates !== undefined) integer(vector.numCandidates, 'vector.numCandidates');
+    if (params.includeVector !== undefined && typeof params.includeVector !== 'boolean') {
+      fail('includeVector must be a boolean.');
+    }
     if (weights !== undefined) {
       if (!weights || typeof weights !== 'object') fail('weights must be an object.');
       const values = [weights.vector ?? 1, weights.text ?? 1];

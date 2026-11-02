@@ -39,6 +39,7 @@ describe('MongoDBVector hybridQuery branch input validation (NODE-7937)', () => 
     ['negative fusion weight', { weights: { vector: -1 } }, /weights/],
     ['non-finite fusion weight', { weights: { text: NaN } }, /weights/],
     ['zero fusion weights', { weights: { vector: 0, text: 0 } }, /positive/],
+    ['non-boolean includeVector', { includeVector: 'yes' }, /includeVector/],
     ['null reranking', { rerank: null }, /rerank.query/],
     ['empty reranking configuration', { rerank: {} }, /rerank.query/],
     ['blank reranking query', { rerank: { query: ' ', paths: ['document'], numDocsToRerank: 50 } }, /rerank.query/],
@@ -3584,20 +3585,32 @@ function testHybridQueryBranchRetrieval(fixture: HybridQueryCollection) {
     expect(results.map(result => result.id)).toEqual([ids[2].toHexString()]);
   });
 
-  it('raises insufficient vector candidates with a warning instead of failing the search', async () => {
-    const warn = vi.spyOn(fixture.store['logger'], 'warn');
-    try {
-      const results = await search({ vector: { limit: 3, numCandidates: 1 } });
-      expect(results).toHaveLength(3);
-      expect(fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch.numCandidates).toBe(3);
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('raising'), expect.objectContaining({ limit: 3 }));
-    } finally {
-      warn.mockRestore();
-    }
+  it('sends an explicit numCandidates unchanged and surfaces the server rejection', async () => {
+    await expect(search({ vector: { limit: 3, numCandidates: 1 } })).rejects.toMatchObject({
+      category: 'THIRD_PARTY',
+      cause: { message: expect.any(String) },
+    });
+    expect(fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch.numCandidates).toBe(1);
+  });
+
+  it('keeps the computed default numCandidates at or above the vector limit', async () => {
+    await search({ vector: { limit: 50 }, topK: 1 });
+    expect(
+      fixture.lastPipeline[0].$rankFusion.input.pipelines.vector[0].$vectorSearch.numCandidates,
+    ).toBeGreaterThanOrEqual(50);
   });
 }
 
 function testOrdinaryVectorIndex(fixture: HybridQueryCollection) {
+  it('returns stored embeddings only when includeVector is true', async () => {
+    const without = await fixture.search({ topK: 1 });
+    expect(without[0]).not.toHaveProperty('vector');
+    expect(without[0].metadata).not.toHaveProperty('content.embedding');
+
+    const [withVector] = await fixture.search({ topK: 1, includeVector: true });
+    expect(withVector.vector).toEqual([1, 0, 0, 0]);
+  });
+
   it('rejects automatic query embedding on an ordinary vector index', async () => {
     await expect(
       fixture.store.hybridQuery({
