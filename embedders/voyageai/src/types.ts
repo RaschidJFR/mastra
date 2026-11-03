@@ -387,6 +387,8 @@ export interface VoyageContextualizedEmbeddingResponse {
  * VoyageAI reranking models
  */
 export type VoyageRerankerModel =
+  | 'rerank-3'
+  | 'rerank-3-lite'
   | 'rerank-2.5'
   | 'rerank-2.5-lite'
   | 'rerank-2'

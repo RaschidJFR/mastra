@@ -63,6 +63,119 @@ export interface MongoDBQueryVectorParams extends QueryVectorParams<MongoDBVecto
   metadataMode?: 'field' | 'document';
 }
 
+/** Flat options for {@link MongoDBVector.hybridQuery}, sharing one limit across both branches. */
+export interface MongoDBHybridQueryParams {
+  indexName: string;
+  /** Query embedding for the vector branch. Supply this or `queryText`, not both. */
+  queryVector?: number[];
+  /**
+   * Text for MongoDB to embed server-side for the vector branch. autoEmbed indexes only.
+   * Independent of `query`, so the two branches can search for different things.
+   */
+  queryText?: string;
+  /**
+   * Embedding model for the vector branch, overriding the index's. Requires `queryText`
+   * and must be compatible with the index's model.
+   */
+  model?: string;
+  /** Full-text (BM25) term for the text branch. */
+  query: string;
+  paths: string[];
+  topK?: number;
+  filter?: MongoDBVectorFilter;
+  weights?: { vector?: number; text?: number };
+  numCandidates?: number;
+  metadataMode?: 'field' | 'document';
+  /** Override the resolved full-text search index name for this call. */
+  textSearchIndexName?: string;
+}
+
+/**
+ * Per-branch retrieval and optional native reranking options for {@link MongoDBVector.hybridQuery}.
+ *
+ * The result shape follows the collection: managed indexes return the managed `metadata` and
+ * `document` fields; bring-your-own (BYO) indexes return the source document as `metadata`,
+ * without its embedding.
+ */
+export interface MongoDBHybridQueryBranchParams {
+  /** Logical Mastra index, resolving the collection and its registered search indexes. */
+  indexName: string;
+  /** Final result limit, applied after fusion and optional reranking. Integer from 1 to 10000; defaults to 10. */
+  topK?: number;
+  /**
+   * Filter applied to both retrieval branches before fusion. On managed indexes, bare keys
+   * target the managed `metadata` fields; on BYO indexes, they target source document fields.
+   */
+  filter?: MongoDBVectorFilter;
+  /** Non-negative, finite fusion weights. Each omitted weight defaults to 1; at least one must be positive. */
+  weights?: { vector?: number; text?: number };
+  /**
+   * Return each result's stored embedding as `vector`. Defaults to false. Not supported on
+   * autoEmbed indexes, whose generated embeddings are not stored on the documents.
+   */
+  includeVector?: boolean;
+  /** Vector retrieval using either an embedding you generate or text for an autoEmbed index. */
+  vector: (
+    | {
+        /**
+         * Embedding that you generate. Mutually exclusive with query and model. Not supported on
+         * autoEmbed indexes, which only accept query text; passing it there throws a USER error.
+         */
+        queryVector: number[];
+        query?: never;
+        model?: never;
+      }
+    | {
+        /** Non-empty text for MongoDB to embed. Requires an autoEmbed index. */
+        query: string;
+        queryVector?: never;
+        /** Query embedding model override, independent of the reranking model. */
+        model?: string;
+      }
+  ) & {
+    /**
+     * Candidates considered by vector search, from 1 to 10000. Defaults to min(10000, 20 * limit),
+     * following MongoDB's recommendation of at least 20 times the vector limit.
+     * An explicit value is sent to MongoDB unchanged, which rejects one below the vector limit.
+     */
+    numCandidates?: number;
+    /** Vector results contributed to fusion, from 1 to 10000. Defaults to min(10000, max(4 * topK, 20)). */
+    limit?: number;
+    /**
+     * Bring-your-own collections only: search this existing vector index instead of the registered
+     * one. Filters with this option run client-side, so the index must declare `_id` as a filter
+     * field. Server-side filtering is not supported for this option yet. Rejected on managed
+     * indexes, which use their registered indexes.
+     */
+    searchIndexName?: string;
+  };
+  /** Full-text (BM25) retrieval, configured independently of vector retrieval. */
+  text: {
+    /** Non-empty full-text query. */
+    query: string;
+    /** Non-empty array of indexed field paths to search, relative to the document root (e.g. `metadata.text`). */
+    paths: string[];
+    /**
+     * Bring-your-own collections only: search this existing full-text index instead of the
+     * registered one. Rejected on managed indexes, which use their registered indexes.
+     */
+    searchIndexName?: string;
+    /** Text results contributed to fusion, from 1 to 10000. Defaults to min(10000, max(4 * topK, 20)). */
+    limit?: number;
+  };
+  /** Enable native $rerank after fusion. Omit to return fused results without reranking. */
+  rerank?: {
+    /** Non-empty query used to judge relevance, independent of both retrieval queries. */
+    query: string;
+    /** Non-empty array of field paths, relative to the document root. Missing document fields cause a server error. */
+    paths: string[];
+    /** Native reranking model. Defaults to 'rerank-3'; never changes the embedding model. */
+    model?: string;
+    /** Maximum fused documents to rerank and return before topK. Required integer from 1 to 1000. */
+    numDocsToRerank: number;
+  };
+}
+
 /**
  * Automated Embedding configuration. MongoDB embeds the text at `path` when documents are
  * written, and embeds a `queryText` string at query time, using the same model.
@@ -1197,31 +1310,21 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
    * (see {@link assertRankFusionSupported}: generally available from 8.1; on 8.0.x it may
    * need a MongoDB support case to enable, and runs where enabled, e.g. Atlas 8.0.x).
    */
-  async hybridQuery(params: {
-    indexName: string;
-    /** Query embedding for the vector branch. Supply this or `queryText`, not both. */
-    queryVector?: number[];
-    /**
-     * Text for MongoDB to embed server-side for the vector branch. autoEmbed indexes only.
-     * Independent of `query`, so the two branches can search for different things.
-     */
-    queryText?: string;
-    /**
-     * Embedding model for the vector branch, overriding the index's. Requires `queryText`
-     * and must be compatible with the index's model.
-     */
-    model?: string;
-    /** Full-text (BM25) term for the text branch. */
-    query: string;
-    paths: string[];
-    topK?: number;
-    filter?: MongoDBVectorFilter;
-    weights?: { vector?: number; text?: number };
-    numCandidates?: number;
-    metadataMode?: 'field' | 'document';
-    /** Override the resolved full-text search index name for this call. */
-    textSearchIndexName?: string;
-  }): Promise<QueryResult[]> {
+  hybridQuery(params: MongoDBHybridQueryParams): Promise<QueryResult[]>;
+  /**
+   * Fuse vector and full-text results with independent retrieval limits and optional native
+   * reranking. Returns QueryResult[] with the final fusion or reranking score.
+   *
+   * @see https://mastra.ai/reference/vectors/mongodb#per-branch-options-and-native-reranking
+   * @see https://www.mongodb.com/docs/vector-search/query/aggregation-stages/rerank/
+   * @throws {MastraError} Invalid inputs, incompatible indexes, or server failures. Server
+   * errors retain their causes; reranking is never silently skipped or substituted.
+   */
+  hybridQuery(params: MongoDBHybridQueryBranchParams): Promise<QueryResult[]>;
+  async hybridQuery(params: MongoDBHybridQueryParams | MongoDBHybridQueryBranchParams): Promise<QueryResult[]> {
+    if ('vector' in params || 'text' in params) {
+      return this.hybridQueryBranches(params as MongoDBHybridQueryBranchParams);
+    }
     const {
       indexName,
       queryVector,
@@ -1276,9 +1379,6 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
     }
     const textIndex = textSearchIndexName ?? (await this.resolveTextSearchIndexName(indexName));
     try {
-      const collection = await this.getCollection(collectionName, true);
-      const metadataFilter = this.transformMetadataFilter(this.transformFilter(filter), metadataMode);
-      const hasMetadataFilter = Object.keys(metadataFilter).length > 0;
       // The branch limit is also capped at 10000: $vectorSearch requires numCandidates >= limit,
       // and numCandidates is itself capped at 10000, so perBranch must not exceed it or a large
       // topK (> 2500, where topK*4 > 10000) would make numCandidates < limit and error.
@@ -1286,68 +1386,23 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
       // numCandidates must be >= the branch limit (perBranch), or $vectorSearch errors
       // server-side. Floor at perBranch (not topK), keep the 10000 cap. (FIX 3)
       const candidates = Math.min(10000, Math.max(perBranch, numCandidates ?? topK * 20));
-
-      const vectorSearch: Document = {
-        index: searchIndexName,
-        path: autoEmbed ? autoEmbed.path : this.embeddingFieldName,
-        ...(queryText ? { query: { text: queryText } } : { queryVector }),
-        ...(model ? { model } : {}),
-        numCandidates: candidates,
-        limit: perBranch,
-      };
-
-      // Apply the metadata filter to the vector branch using the same pushdown-vs-fallback
-      // logic as query(): pass the filter straight to $vectorSearch only when every field is
-      // a declared filter field and every operator is supported; otherwise materialise
-      // matching _ids via $match and filter by _id. This avoids a hard $vectorSearch error
-      // on BYO collections whose metadata fields are typically not declared as filter fields.
-      if (hasMetadataFilter) {
-        let declaredPaths: Set<string>;
-        try {
-          declaredPaths = await this.getDeclaredFilterPaths(indexName);
-        } catch {
-          declaredPaths = new Set();
-        }
-        if (this.canPushDownFilter(metadataFilter, declaredPaths)) {
-          vectorSearch.filter = metadataFilter;
-        } else {
-          const candidateIds = await collection
-            .aggregate([{ $match: metadataFilter }, { $project: { _id: 1 } }])
-            .map(doc => doc._id)
-            .toArray();
-          if (candidateIds.length === 0) return [];
-          vectorSearch.filter = { _id: { $in: candidateIds } };
-        }
-      }
-
-      const textPipeline: Document[] = [
-        { $search: { index: textIndex, text: { query, path: paths } } },
-        ...(hasMetadataFilter ? [{ $match: metadataFilter }] : []),
-        { $limit: perBranch },
-      ];
-
-      const combination = weights ? { weights: { vector: weights.vector ?? 1, text: weights.text ?? 1 } } : undefined;
-      const pipeline: Document[] = [
-        {
-          $rankFusion: {
-            input: { pipelines: { vector: [{ $vectorSearch: vectorSearch }], text: textPipeline } },
-            ...(combination ? { combination } : {}),
-          },
+      return await this.runHybridPipeline({
+        indexName,
+        collectionName,
+        searchIndexName,
+        autoEmbed,
+        metadataMode,
+        filter,
+        weights,
+        topK,
+        vector: {
+          ...(queryText ? { query: queryText } : { queryVector }),
+          ...(model ? { model } : {}),
+          numCandidates: candidates,
+          limit: perBranch,
         },
-        { $limit: Math.min(10000, topK) },
-        // $rankFusion places its Reciprocal Rank Fusion score in the `score` metadata field
-        // (NOT `searchScore`, which is the text-branch score and is absent on vector-only hits).
-        // Score is projected via $meta inside buildProjection (not a preceding $set) so it
-        // never pollutes `metadata: '$$ROOT'` in document mode.
-        ...this.buildProjection(metadataMode, false, 'score', autoEmbed?.path),
-      ];
-      const rows = await collection.aggregate(pipeline).toArray();
-      return rows.map((r: any) => ({
-        id: this.idToString(r._id),
-        score: typeof r.score === 'number' ? r.score : 0,
-        metadata: r.metadata,
-        document: r.document,
-      }));
+        text: { query, paths, searchIndexName: textIndex, limit: perBranch },
+      });
     } catch (error: any) {
       throw new MastraError(
         {
@@ -1357,6 +1412,272 @@ export class MongoDBVector extends MastraVector<MongoDBVectorFilter> {
         },
         error,
       );
+    }
+  }
+
+  private async hybridQueryBranches(params: MongoDBHybridQueryBranchParams): Promise<QueryResult[]> {
+    this.validateHybridQueryBranchParams(params);
+    const { indexName, vector, text, rerank, topK = 10, filter, weights, includeVector = false } = params;
+    const defaultLimit = Math.min(10000, Math.max(topK * 4, 20));
+    const vectorLimit = vector.limit ?? defaultLimit;
+    const textLimit = text.limit ?? defaultLimit;
+    // MongoDB recommends numCandidates of at least 20x the limit. An explicit value is sent as-is,
+    // so MongoDB reports an invalid one (for example, below the vector limit) instead of it being rewritten.
+    const candidates = vector.numCandidates ?? Math.min(10000, vectorLimit * 20);
+
+    try {
+      await this.assertRankFusionSupported();
+      const { collectionName, searchIndexName, autoEmbed, isByo } = await this.resolveIndexTarget(indexName);
+      if (!isByo && (vector.searchIndexName !== undefined || text.searchIndexName !== undefined)) {
+        throw new MastraError({
+          id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'INVALID_ARGS'),
+          text: `vector.searchIndexName and text.searchIndexName are only supported for bring-your-own collections. Managed index "${indexName}" uses its registered search indexes.`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.USER,
+          details: { indexName },
+        });
+      }
+      if (vector.query !== undefined && !autoEmbed) {
+        throw new MastraError({
+          id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'NOT_AUTO_EMBED'),
+          text: `Index "${indexName}" was not created with autoEmbed. Supply vector.queryVector instead of vector.query.`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.USER,
+          details: { indexName },
+        });
+      }
+      if (vector.queryVector !== undefined && autoEmbed) {
+        throw new MastraError({
+          id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'INVALID_ARGS'),
+          text: `Index "${indexName}" was created with autoEmbed, so MongoDB only accepts query text for it. Supply vector.query instead of vector.queryVector.`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.USER,
+          details: { indexName },
+        });
+      }
+      if (includeVector && autoEmbed) {
+        throw new MastraError({
+          id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'INVALID_ARGS'),
+          text: `includeVector is not supported on autoEmbed index "${indexName}": MongoDB keeps the generated embeddings in its own internal database, so they are not on the returned documents.`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.USER,
+          details: { indexName },
+        });
+      }
+      const textIndex = text.searchIndexName ?? (await this.resolveTextSearchIndexName(indexName));
+      const { searchIndexName: vectorIndexOverride, ...vectorInput } = vector;
+      return await this.runHybridPipeline({
+        indexName,
+        collectionName,
+        searchIndexName: vectorIndexOverride ?? searchIndexName,
+        pushDownFilter: vectorIndexOverride === undefined,
+        autoEmbed,
+        includeVector,
+        metadataMode: isByo ? 'document' : 'field',
+        filter,
+        weights,
+        topK,
+        vector: { ...vectorInput, numCandidates: candidates, limit: vectorLimit },
+        text: { query: text.query, paths: text.paths, searchIndexName: textIndex, limit: textLimit },
+        rerank,
+      });
+    } catch (error) {
+      if (error instanceof MastraError && error.category === ErrorCategory.USER) throw error;
+      throw new MastraError(
+        {
+          id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'FAILED'),
+          text: rerank
+            ? 'hybridQuery with native $rerank failed. Check Atlas Native Reranking support, model availability, and that rerank.paths exist in every candidate document.'
+            : 'hybridQuery failed. Check the collection, search indexes, and $rankFusion support.',
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { indexName },
+        },
+        error,
+      );
+    }
+  }
+
+  /** Builds and runs the $rankFusion pipeline shared by both hybridQuery shapes. */
+  private async runHybridPipeline({
+    indexName,
+    collectionName,
+    searchIndexName,
+    pushDownFilter = true,
+    autoEmbed,
+    includeVector = false,
+    metadataMode,
+    filter,
+    weights,
+    topK,
+    vector,
+    text,
+    rerank,
+  }: {
+    indexName: string;
+    collectionName: string;
+    searchIndexName: string;
+    /** False when the vector index is overridden, since declared filter fields belong to the registered index. */
+    pushDownFilter?: boolean;
+    autoEmbed?: IndexTarget['autoEmbed'];
+    includeVector?: boolean;
+    metadataMode: 'field' | 'document';
+    filter?: MongoDBVectorFilter;
+    weights?: { vector?: number; text?: number };
+    topK: number;
+    vector: { queryVector?: number[]; query?: string; model?: string; numCandidates: number; limit: number };
+    text: { query: string; paths: string[]; searchIndexName: string; limit: number };
+    rerank?: MongoDBHybridQueryBranchParams['rerank'];
+  }): Promise<QueryResult[]> {
+    const collection = await this.getCollection(collectionName, true);
+    const metadataFilter = this.transformMetadataFilter(this.transformFilter(filter), metadataMode);
+    const hasMetadataFilter = Object.keys(metadataFilter).length > 0;
+    const vectorSearch: Document = {
+      index: searchIndexName,
+      path: autoEmbed ? autoEmbed.path : this.embeddingFieldName,
+      ...(vector.query !== undefined ? { query: { text: vector.query } } : { queryVector: vector.queryVector }),
+      ...(vector.model !== undefined ? { model: vector.model } : {}),
+      numCandidates: vector.numCandidates,
+      limit: vector.limit,
+    };
+
+    // Apply the metadata filter to the vector branch using the same pushdown-vs-fallback
+    // logic as query(): pass the filter straight to $vectorSearch only when every field is
+    // a declared filter field and every operator is supported; otherwise materialise
+    // matching _ids via $match and filter by _id. This avoids a hard $vectorSearch error
+    // on BYO collections whose metadata fields are typically not declared as filter fields.
+    if (hasMetadataFilter) {
+      let declaredPaths = new Set<string>();
+      if (pushDownFilter) {
+        try {
+          declaredPaths = await this.getDeclaredFilterPaths(indexName);
+        } catch {
+          declaredPaths = new Set();
+        }
+      }
+      if (this.canPushDownFilter(metadataFilter, declaredPaths)) {
+        vectorSearch.filter = metadataFilter;
+      } else {
+        const candidateIds = await collection
+          .aggregate([{ $match: metadataFilter }, { $project: { _id: 1 } }])
+          .map(doc => doc._id)
+          .toArray();
+        if (candidateIds.length === 0) return [];
+        vectorSearch.filter = { _id: { $in: candidateIds } };
+      }
+    }
+
+    const pipeline: Document[] = [
+      {
+        $rankFusion: {
+          input: {
+            pipelines: {
+              vector: [{ $vectorSearch: vectorSearch }],
+              text: [
+                { $search: { index: text.searchIndexName, text: { query: text.query, path: text.paths } } },
+                ...(hasMetadataFilter ? [{ $match: metadataFilter }] : []),
+                { $limit: text.limit },
+              ],
+            },
+          },
+          ...(weights ? { combination: { weights: { vector: weights.vector ?? 1, text: weights.text ?? 1 } } } : {}),
+        },
+      },
+      ...(rerank
+        ? [
+            {
+              $rerank: {
+                query: { text: rerank.query },
+                path: rerank.paths,
+                model: rerank.model ?? 'rerank-3',
+                numDocsToRerank: rerank.numDocsToRerank,
+              },
+            },
+          ]
+        : []),
+      { $limit: Math.min(10000, topK) },
+      // $rankFusion and $rerank both publish their score as `$meta: 'score'` (NOT `searchScore`,
+      // which is the text-branch score and is absent on vector-only hits). Score is projected via
+      // $meta inside buildProjection (not a preceding $set) so it never pollutes
+      // `metadata: '$$ROOT'` in document mode, and only after reranking so $rerank sees source fields.
+      ...this.buildProjection(metadataMode, includeVector, 'score', autoEmbed?.path),
+    ];
+    const rows = await collection.aggregate(pipeline).toArray();
+    return rows.map((row: Document) => ({
+      id: this.idToString(row._id),
+      score: typeof row.score === 'number' ? row.score : 0,
+      metadata: row.metadata,
+      document: row.document,
+      ...(includeVector ? { vector: row.vector } : {}),
+    }));
+  }
+
+  private validateHybridQueryBranchParams(params: MongoDBHybridQueryBranchParams): void {
+    const fail = (text: string): never => {
+      throw new MastraError({
+        id: createVectorErrorId('MONGODB', 'HYBRID_QUERY', 'INVALID_ARGS'),
+        text,
+        domain: ErrorDomain.STORAGE,
+        category: ErrorCategory.USER,
+      });
+    };
+    const nonEmptyString = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
+    const integer = (value: unknown, name: string, max = 10000) => {
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > max) {
+        fail(`${name} must be an integer from 1 to ${max}.`);
+      }
+    };
+    const paths = (value: unknown, name: string) => {
+      if (!Array.isArray(value) || value.length === 0 || !value.every(nonEmptyString)) {
+        fail(`${name} must be a non-empty array of non-empty field paths.`);
+      }
+    };
+    if (!params || !nonEmptyString(params.indexName)) fail('indexName must be a non-empty string.');
+    const { vector, text, rerank, weights } = params;
+    if (!vector || typeof vector !== 'object') fail('vector retrieval configuration is required.');
+    if ((vector.queryVector !== undefined) === (vector.query !== undefined)) {
+      fail('Supply exactly one of vector.queryVector or vector.query.');
+    }
+    if (vector.queryVector !== undefined) {
+      if (
+        !Array.isArray(vector.queryVector) ||
+        vector.queryVector.length === 0 ||
+        !vector.queryVector.every(value => typeof value === 'number' && Number.isFinite(value))
+      ) {
+        fail('vector.queryVector must be a non-empty array of finite numbers.');
+      }
+    } else if (!nonEmptyString(vector.query)) fail('vector.query must be a non-empty string.');
+    if (vector.model !== undefined && (vector.query === undefined || !nonEmptyString(vector.model))) {
+      fail('vector.model must be a non-empty string and requires vector.query.');
+    }
+    if (!text || !nonEmptyString(text.query)) fail('text.query must be a non-empty string.');
+    paths(text.paths, 'text.paths');
+    if (text.searchIndexName !== undefined && !nonEmptyString(text.searchIndexName)) {
+      fail('text.searchIndexName must be a non-empty string.');
+    }
+    if (vector.searchIndexName !== undefined && !nonEmptyString(vector.searchIndexName)) {
+      fail('vector.searchIndexName must be a non-empty string.');
+    }
+    if (params.topK !== undefined) integer(params.topK, 'topK');
+    if (vector.limit !== undefined) integer(vector.limit, 'vector.limit');
+    if (text.limit !== undefined) integer(text.limit, 'text.limit');
+    if (vector.numCandidates !== undefined) integer(vector.numCandidates, 'vector.numCandidates');
+    if (params.includeVector !== undefined && typeof params.includeVector !== 'boolean') {
+      fail('includeVector must be a boolean.');
+    }
+    if (weights !== undefined) {
+      if (!weights || typeof weights !== 'object') fail('weights must be an object.');
+      const values = [weights.vector ?? 1, weights.text ?? 1];
+      if (values.some(value => typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
+        fail('weights.vector and weights.text must be finite, non-negative numbers.');
+      }
+      if (values.every(value => value === 0)) fail('At least one fusion weight must be positive.');
+    }
+    if (rerank !== undefined) {
+      if (!rerank || !nonEmptyString(rerank.query)) fail('rerank.query must be a non-empty string.');
+      paths(rerank.paths, 'rerank.paths');
+      integer(rerank.numDocsToRerank, 'rerank.numDocsToRerank', 1000);
+      if (rerank.model !== undefined && !nonEmptyString(rerank.model)) fail('rerank.model must be a non-empty string.');
     }
   }
 
