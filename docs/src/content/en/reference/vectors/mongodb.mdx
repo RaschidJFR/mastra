@@ -563,7 +563,7 @@ This form has the same `$rankFusion` requirements and registered indexes. For br
 
 Native [`$rerank`](https://www.mongodb.com/docs/vector-search/query/aggregation-stages/rerank/) requires Atlas running MongoDB 9.0 or later with **Native Reranking** enabled in the project's settings. The default `rerank-3` model is in Preview and requires a dedicated M10-or-higher cluster. Self-managed and Atlas Local deployments don't support native reranking. No separate Voyage AI client or application-side API key is required.
 
-With an initialized `store`, registered indexes, a caller-generated `embedding`, and text stored in `metadata.text`, retrieve candidates and rerank them in one call:
+With an initialized `store`, registered indexes, an `embedding` you generated, and text stored in `metadata.text`, retrieve candidates and rerank them in one call:
 
 ```typescript
 const results = await store.hybridQuery({
@@ -609,7 +609,7 @@ const results = await store.hybridQuery({
     type: 'MongoDBVectorFilter',
     isOptional: true,
     description:
-      'Filter applied to both retrieval branches before fusion. On managed indexes, keys target the managed metadata fields. On bring-your-own indexes, keys target source document fields. Uses the same vector filter pushdown or candidate-ID fallback as the flat form.',
+      'Filter applied to both retrieval branches before fusion. On managed indexes, keys target the managed metadata fields. On bring-your-own indexes, keys target source document fields. Filters on fields declared in `filterFields` run server-side; other filters run client-side, as in the flat form.',
   },
   {
     name: 'weights',
@@ -636,7 +636,7 @@ const results = await store.hybridQuery({
     type: 'number[]',
     isOptional: true,
     description:
-      'Non-empty, finite caller-generated embedding. Mutually exclusive with vector.query and vector.model. Not supported on `autoEmbed` indexes, which throw an error; use vector.query instead.',
+      'Non-empty, finite embedding that you generate. Mutually exclusive with vector.query and vector.model. Not supported on `autoEmbed` indexes, which throw an error; use vector.query instead.',
   },
   {
     name: 'vector.query',
@@ -671,7 +671,7 @@ const results = await store.hybridQuery({
     type: 'string',
     isOptional: true,
     description:
-      'Bring-your-own collections only. Search this existing vector index instead of the registered one. Filters then always use the candidate-ID fallback, because declared filter fields are read from the registered index. Managed indexes throw an error.',
+      'Bring-your-own collections only. Search this existing vector index instead of the registered one. Filters with this option run client-side, so the index must declare `_id` as a filter field. Server-side filtering is not supported for this option yet. Managed indexes throw an error.',
   },
   {
     name: 'text',

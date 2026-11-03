@@ -3553,13 +3553,17 @@ async function seedByo(store: MongoDBVector, indexName: string, { autoEmbed = fa
   await store.createSearchIndex({ indexName, waitUntilReady: true });
 }
 
-/** Index readiness doesn't mean every document is searchable yet, so poll until all three are. */
+/**
+ * Index readiness doesn't mean every document is searchable yet. The vector branch alone can
+ * return all three articles, so also poll the full-text index until it finds the keyword match.
+ */
 async function waitUntilSearchable(store: MongoDBVector, indexName: string, vector: any, path: string) {
   await waitForSync(
     store,
     indexName,
     async () =>
-      (await store.hybridQuery({ indexName, vector, text: { query: 'password', paths: [path] } })).length === 3,
+      (await store.hybridQuery({ indexName, vector, text: { query: 'password', paths: [path] } })).length === 3 &&
+      ids(await store.textQuery({ indexName, query: 'password', paths: [path] })).includes('password-reset'),
     300000,
     2000,
   );
@@ -3672,6 +3676,37 @@ describe('hybridQuery per-branch options: managed collection (Atlas Local)', () 
       filter: { category: 'no-such-category' },
     });
     expect(results).toEqual([]);
+  });
+
+  it('limits the vector branch to vector.limit', async () => {
+    // The vector branch keeps only "overdue-invoice", and the text branch matches only
+    // "password-reset", so "spreadsheet-sort" is in neither.
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0], limit: 1 },
+      text: { query: 'password', paths: ['document'] },
+    });
+    expect(ids(results).sort()).toEqual(['overdue-invoice', 'password-reset']);
+  });
+
+  it('limits the text branch to text.limit', async () => {
+    // "settings" also matches "overdue-invoice", but "password-reset" scores higher on both
+    // terms, so a text limit of 1 keeps only it. The vector branch keeps only "spreadsheet-sort".
+    const results = await store.hybridQuery({
+      indexName,
+      vector: { queryVector: [0, 0, 1, 0], limit: 1 },
+      text: { query: 'password settings', paths: ['document'], limit: 1 },
+    });
+    expect(ids(results).sort()).toEqual(['password-reset', 'spreadsheet-sort']);
+  });
+
+  it('sends an explicit vector.numCandidates unchanged, so MongoDB rejects one below vector.limit', async () => {
+    const results = store.hybridQuery({
+      indexName,
+      vector: { queryVector: [1, 0, 0, 0], limit: 3, numCandidates: 2 },
+      text: { query: 'password', paths: ['document'] },
+    });
+    await expect(results).rejects.toMatchObject({ category: 'THIRD_PARTY', cause: { message: /numCandidates/ } });
   });
 
   it('rejects search index name overrides, which are for BYO collections only', async () => {
@@ -3837,11 +3872,11 @@ describe('hybridQuery per-branch options: BYO collection (Atlas Local)', () => {
 
 // ─── hybridQuery against Atlas: native reranking and automatic embeddings ────────────────
 // These run against an Atlas cluster and consume Voyage AI embedding and reranking tokens.
-// Set TEST_MONGODB_URI in stores/mongodb/.env to run them; skipped otherwise.
+// Set MONGODB_URI in stores/mongodb/.env to run them; skipped otherwise.
 // Native reranking also needs MongoDB 9.0+, M10 or larger, and Native Reranking enabled in the
 // project, so its tests need an explicit opt-in as well:
 //   TEST_RERANKER=1 pnpm --filter @mastra/mongodb test
-const ATLAS_URI = process.env.TEST_MONGODB_URI;
+const ATLAS_URI = process.env.MONGODB_URI;
 const RERANKING_ENABLED = Boolean(ATLAS_URI) && process.env.TEST_RERANKER === '1';
 const describeAtlas = ATLAS_URI ? describe : describe.skip;
 const describeReranking = RERANKING_ENABLED ? describe : describe.skip;

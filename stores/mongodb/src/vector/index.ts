@@ -114,11 +114,11 @@ export interface MongoDBHybridQueryBranchParams {
    * autoEmbed indexes, whose generated embeddings are not stored on the documents.
    */
   includeVector?: boolean;
-  /** Vector retrieval using either a caller-generated embedding or text for an autoEmbed index. */
+  /** Vector retrieval using either an embedding you generate or text for an autoEmbed index. */
   vector: (
     | {
         /**
-         * Caller-generated embedding. Mutually exclusive with query and model. Not supported on
+         * Embedding that you generate. Mutually exclusive with query and model. Not supported on
          * autoEmbed indexes, which only accept query text; passing it there throws a USER error.
          */
         queryVector: number[];
@@ -143,8 +143,9 @@ export interface MongoDBHybridQueryBranchParams {
     limit?: number;
     /**
      * Bring-your-own collections only: search this existing vector index instead of the registered
-     * one. Filters then always use the pre-filter fallback, because declared filter fields are read
-     * from the registered index. Rejected on managed indexes, which use their registered indexes.
+     * one. Filters with this option run client-side, so the index must declare `_id` as a filter
+     * field. Server-side filtering is not supported for this option yet. Rejected on managed
+     * indexes, which use their registered indexes.
      */
     searchIndexName?: string;
   };
